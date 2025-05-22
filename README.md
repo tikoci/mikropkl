@@ -107,7 +107,7 @@ After installing and starting the machine, ROSE storage is disabled by default. 
 ```
 You will need to reboot to install ROSE package needed for storage features.  As a starting example, you can format and SMB share the extra disks in ROSE CHR using:
 ```routeros
- :foreach d in=[/disk/find] do={/disk format-drive $d file-system=btrfs without-paging }          
+ :foreach d in=[/disk/find] do={/disk format $d file-system=btrfs without-paging }          
  :foreach d in=[/disk/find] do={/disk set $d smb-sharing=yes smb-user=rose smb-password=rose }          
 ```
 Once formated, you then use any of the BTRFS features, including RAID 1 and RAID 10 – or, use another file system or other storage features, including snapshots.  See Mikrotik's [ROSE documentation](https://help.mikrotik.com/docs/x/HwCZEQ) for more information.
