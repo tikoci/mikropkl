@@ -1,0 +1,141 @@
+
+name: Streamlined Build
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * *"
+
+permissions: write-all
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    name: Check New RouterOS Version
+    outputs:
+      versions: ${{ steps.needs-versions.outputs.result }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Get RouterOS "stable" version
+        id: get-stable
+        run: |
+          ROSVER=`curl -s --max-time 10 --fail https://upgrade.mikrotik.com/routeros/NEWESTa7.stable | awk 'FS=" " {print $1}'`
+          [ -z "$ROSVER" ] && echo "::error::Failed to get stable version" && exit 1
+          echo version=$ROSVER >> $GITHUB_OUTPUT
+          echo $ROSVER
+      - name: Get RouterOS "testing" version
+        id: get-testing
+        run: |
+          ROSVER=`curl -s --max-time 10 --fail https://upgrade.mikrotik.com/routeros/NEWESTa7.testing | awk 'FS=" " {print $1}'`
+          [ -z "$ROSVER" ] && echo "::error::Failed to get testing version" && exit 1
+          echo version=$ROSVER >> $GITHUB_OUTPUT
+          echo $ROSVER
+      - name: Get RouterOS "development" version
+        id: get-dev
+        run: |
+          ROSVER=`curl -s --max-time 10 --fail https://upgrade.mikrotik.com/routeros/NEWESTa7.development | awk 'FS=" " {print $1}'`
+          [ -z "$ROSVER" ] && echo "::error::Failed to get development version" && exit 1
+          echo version=$ROSVER >> $GITHUB_OUTPUT
+          echo $ROSVER
+      - name: Get RouterOS "long-term" version
+        id: get-longterm
+        run: |
+          ROSVER=`curl -s --max-time 10 --fail https://upgrade.mikrotik.com/routeros/NEWESTa7.long-term | awk 'FS=" " {print $1}'`
+          [ -z "$ROSVER" ] && echo "::error::Failed to get long-term version" && exit 1
+          echo version=$ROSVER >> $GITHUB_OUTPUT
+          echo $ROSVER
+      - name: Check "stable" channel release exists
+        id: has-stable
+        uses: insightsengineering/release-existence-action@v1.0.0
+        with:
+          release-tag: chr-${{ steps.get-stable.outputs.version }}
+      - name: Check "testing" channel release exists
+        id: has-testing
+        uses: insightsengineering/release-existence-action@v1.0.0
+        with:
+          release-tag: chr-${{ steps.get-testing.outputs.version }}
+      - name: Check "development" channel release exists
+        id: has-dev
+        uses: insightsengineering/release-existence-action@v1.0.0
+        with:
+          release-tag: chr-${{ steps.get-dev.outputs.version }}
+      - name: Check "long-term" channel release exists
+        id: has-longterm
+        uses: insightsengineering/release-existence-action@v1.0.0
+        with:
+          release-tag: chr-${{ steps.get-longterm.outputs.version }}
+      - name: Build list of versions needing build
+        id: needs-versions
+        uses: actions/github-script@v6
+        with:
+          result-encoding: json
+          script: |
+            const versions = []
+            if (!${{ steps.has-stable.outputs.release-exists }}) {
+              versions.push("${{ steps.get-stable.outputs.version }}")
+            }
+            if (!${{ steps.has-testing.outputs.release-exists }}) {
+              versions.push("${{ steps.get-testing.outputs.version }}")
+            }
+            if (!${{ steps.has-dev.outputs.release-exists }}) {
+              versions.push("${{ steps.get-dev.outputs.version }}")
+            }
+            if (!${{ steps.has-longterm.outputs.release-exists }}) {
+              versions.push("${{ steps.get-longterm.outputs.version }}")
+            }
+            console.log(versions)
+            return versions
+      - name: Log Results
+        run: |
+          echo '${{ steps.needs-versions.outputs.result }}'
+          echo '${{ fromJSON(steps.needs-versions.outputs.result)[0] != null }}'
+
+  dispatch-fat-chr:
+    needs: check
+    runs-on: ubuntu-latest
+    name: Trigger fat-chr Auto Build
+    if: ${{ fromJSON(needs.check.outputs.versions)[0] != null }}
+    continue-on-error: true
+    steps:
+      - name: Trigger tikoci/fat-chr auto workflow via dispatch
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.FAT_CHR_TOKEN }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'tikoci',
+              repo: 'fat-chr',
+              workflow_id: 'auto.yaml',
+              ref: 'main'
+            })
+
+  build:
+    needs:
+      - check
+      - dispatch-fat-chr
+    runs-on: ubuntu-latest
+    name: Trigger CHR Build for ${{ matrix.version }}
+    if: |
+      always() &&
+      needs.check.result == 'success' &&
+      fromJSON(needs.check.outputs.versions)[0] != null
+    strategy:
+      matrix:
+        version: ${{ fromJSON(needs.check.outputs.versions) }}
+      max-parallel: 1
+    steps:
+      - name: Trigger chr.yaml for ${{ matrix.version }}
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'chr.yaml',
+              ref: 'main',
+              inputs: {
+                version: '${{ matrix.version }}'
+              }
+            })
