@@ -15,7 +15,7 @@ class RouterOSVersion {
   arch: RouterOSReleaseArch
   product: RouterOSReleaseProduct = "chr"
   downloadUrl : URL.Download = new {
-      name = "\(product)-\(version).\(_imageType)"
+      name = "\(product)-\(version)\(_arch).\(_imageType)"
       url = "https://download.mikrotik.com/routeros/\(version)/\(product)-\(version)\(_arch).\(_imageType)"
       filename = "\(product)-\(version)\(_arch).img"
   }
