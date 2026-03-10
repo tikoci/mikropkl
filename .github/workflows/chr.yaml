@@ -58,37 +58,6 @@ jobs:
         id: make
         run: |
           make ${{ github.event.inputs.makefileflags }} CHR_VERSION=${{ steps.get-routeros-version.outputs.version }}  
-      - name: Load nbd kernel module for image conversion
-        run: sudo modprobe nbd
-      - name: Convert aarch64 CHR image boot partition from ext2 to FAT for UEFI compatibility
-        run: |
-          set -e
-          for IMG in $(find Machines -name '*-arm64.img' -type f); do
-            echo "Converting boot partition in ${IMG} from ext2 to FAT..."
-            ORIG="${IMG}.orig"
-            cp -f "${IMG}" "${ORIG}"
-            trap "sudo umount /tmp/chr-bios 2>/dev/null || true; sudo umount /tmp/chr-efi 2>/dev/null || true; sudo rm -rf /tmp/chr-bios /tmp/chr-efi; sudo qemu-nbd -d /dev/nbd0 2>/dev/null || true; sudo qemu-nbd -d /dev/nbd1 2>/dev/null || true; rm -f '${ORIG}'" EXIT
-            sudo qemu-nbd -c /dev/nbd0 -f raw "${ORIG}"
-            sudo qemu-nbd -c /dev/nbd1 -f raw "${IMG}"
-            for DEV in /dev/nbd0p1 /dev/nbd1p1; do
-              WAIT=0
-              until [ -b "${DEV}" ] || [ "${WAIT}" -ge 10 ]; do sleep 1; WAIT=$((WAIT+1)); done
-              [ -b "${DEV}" ] || { echo "ERROR: ${DEV} not available after ${WAIT}s"; exit 1; }
-            done
-            sudo mkdir -p /tmp/chr-bios /tmp/chr-efi
-            sudo mount /dev/nbd0p1 /tmp/chr-bios
-            sudo mkfs.fat -F 16 /dev/nbd1p1
-            sudo mount /dev/nbd1p1 /tmp/chr-efi
-            sudo rsync -a /tmp/chr-bios/ /tmp/chr-efi/
-            sudo umount /tmp/chr-bios
-            sudo umount /tmp/chr-efi
-            sudo rm -rf /tmp/chr-bios /tmp/chr-efi
-            sudo qemu-nbd -d /dev/nbd0
-            sudo qemu-nbd -d /dev/nbd1
-            rm -f "${ORIG}"
-            trap - EXIT
-            echo "Done: ${IMG}"
-          done
       - name: Store /Machines directory .utm machines built, for the "dynamic matrix of artifacts"
         id: outputdirs
         run: |
