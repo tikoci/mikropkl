@@ -3,6 +3,7 @@ import "Randomish.pkl"
 import "UTM.pkl"
 import "URL.pkl"
 import "SVG.pkl"
+import "Libvirt.pkl"
 
 name : String
 
@@ -109,6 +110,23 @@ output {
     when (backend == "Apple") {
       ["\(name).utm/Data/efi_vars.fd.localcp"] { 
         text = "efi_vars.fd" 
+      }
+    }
+
+    // libvirt XML domain definition (QEMU backend only)
+    // Allows the same disk images to be used with `virsh define libvirt.xml`
+    when (backend == "QEMU") {
+      ["\(name).utm/libvirt.xml"] {
+        text = Libvirt.domain(
+          name,
+          architecture,
+          memory.toUnit("mib").value.toInt(),
+          if (cpus == 0) 1 else cpus,
+          List(imageDownloadUrl.filename)
+            + additionalDisks.mapIndexed((i, _e) -> "qdisk\(i).qcow2"),
+          Randomish.macAddress(name, 0, "e"),
+          notes
+        )
       }
     }
 

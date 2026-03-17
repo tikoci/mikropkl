@@ -1,0 +1,255 @@
+name: "Test: Libvirt / QEMU Boot"
+
+# Builds each QEMU manifest and boots it under qemu-system on arch-specific
+# GitHub runners to verify RouterOS starts successfully.
+# Verification: /rest/system/check-installation returns {"status":"installation is ok"}
+#
+# Does NOT publish a release or push tags. CI-only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rosver:
+        description: 'RouterOS Version (e.g. 7.22, 7.22rc2, 7.22beta4)'
+        required: true
+        default: "stable"
+      pklversion:
+        default: "0.30.2"
+        type: string
+        description: 'pkl Version'
+        required: true
+
+jobs:
+  # ── Phase 1: build all QEMU machine bundles ───────────────────────────────
+  # We build on ubuntu-latest (x86_64); pkl just generates files, no arch needed.
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      # JSON array of machine dir names that have a libvirt.xml, e.g.
+      # ["chr.aarch64.qemu.7.22.utm","chr.x86_64.qemu.7.22.utm", ...]
+      qemu-machines: ${{ steps.list-machines.outputs.machines }}
+      chr-version: ${{ steps.resolve-version.outputs.version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        # qemu-utils provides qemu-img (needed by make phase2 for spare disks)
+        # wget for image downloads, libxml2-utils provides xmllint (used by Makefile)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-utils wget libxml2-utils make unzip zip
+
+      - name: Install Apple pkl
+        run: |
+          curl -L -o pkl "https://github.com/apple/pkl/releases/download/${{ github.event.inputs.pklversion }}/pkl-linux-amd64"
+          chmod +x pkl
+          ./pkl --version
+          sudo cp ./pkl /usr/local/bin/pkl
+
+      - name: Resolve RouterOS version
+        id: resolve-version
+        run: |
+          VERSION=$(CHR_VERSION=${{ github.event.inputs.rosver }} pkl eval ./Pkl/chr-version.pkl)
+          echo "Resolved RouterOS version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build machine bundles (make)
+        run: make CHR_VERSION=${{ steps.resolve-version.outputs.version }}
+
+      - name: List QEMU machines with libvirt.xml
+        id: list-machines
+        run: |
+          machines=$(ls Machines/ | grep '\.utm$' | while read d; do
+            if [ -f "Machines/$d/libvirt.xml" ]; then
+              echo "$d"
+            fi
+          done | jq -R -s -c 'split("\n")[:-1]')
+          echo "QEMU machines: $machines"
+          echo "machines=$machines" >> $GITHUB_OUTPUT
+
+      - name: Upload built Machines as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Machines
+          path: ./Machines
+          # Retain for 1 day — only needed for the test jobs below
+          retention-days: 1
+
+  # ── Phase 2: boot test — one job per machine, arch-matched runner ─────────
+  test:
+    needs: build
+    strategy:
+      matrix:
+        machine: ${{ fromJSON(needs.build.outputs.qemu-machines) }}
+      # Run all tests independently; don't fail all if one arch fails
+      fail-fast: false
+
+    # Select runner by architecture embedded in the machine directory name.
+    # e.g. "chr.aarch64.qemu.7.22.utm" → ubuntu-24.04-arm
+    #      "chr.x86_64.qemu.7.22.utm"  → ubuntu-latest  (x86_64)
+    runs-on: ${{ contains(matrix.machine, 'aarch64') && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+
+    env:
+      MACHINE_DIR: ./Machines/${{ matrix.machine }}
+      LIBVIRT_XML: ./Machines/${{ matrix.machine }}/libvirt.xml
+      REST_URL: http://localhost:9180/rest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download built Machines artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Machines
+          path: ./Machines
+
+      - name: Restore executable bit on disk images
+        # upload-artifact strips +x; make sure nothing breaks (images are data files anyway)
+        run: chmod -R u+r ./Machines
+
+      - name: Install QEMU and libvirt tools
+        run: |
+          sudo apt-get update -y
+          if echo "${{ matrix.machine }}" | grep -q 'aarch64'; then
+            sudo apt-get install -y qemu-system-arm qemu-efi-aarch64 libvirt-clients libxml2-utils
+          else
+            sudo apt-get install -y qemu-system-x86 libvirt-clients libxml2-utils
+          fi
+
+      - name: Enable KVM (if available)
+        # GitHub hosted runners support KVM on x86_64; aarch64 runners may also.
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+              | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+            ls -la /dev/kvm
+            echo "KVM_EXTRA=-enable-kvm -cpu host" >> $GITHUB_ENV
+          else
+            echo "::warning::KVM not available — running in software emulation (slow)"
+            echo "KVM_EXTRA=" >> $GITHUB_ENV
+          fi
+
+      - name: Validate libvirt XML against schema
+        # libvirt-clients ships virt-xml-validate on Ubuntu
+        run: |
+          if command -v virt-xml-validate &>/dev/null; then
+            virt-xml-validate "$LIBVIRT_XML" domain && echo "XML validates OK"
+          else
+            echo "::notice::virt-xml-validate not found, skipping schema validation"
+          fi
+
+      - name: Extract VM parameters from libvirt.xml
+        id: vmparams
+        run: |
+          ARCH=$(xmllint --xpath 'string(/domain/os/type/@arch)' "$LIBVIRT_XML")
+          MACHINE=$(xmllint --xpath 'string(/domain/os/type/@machine)' "$LIBVIRT_XML")
+          MEM=$(xmllint --xpath 'string(/domain/memory)' "$LIBVIRT_XML")
+          VCPU=$(xmllint --xpath 'string(/domain/vcpu)' "$LIBVIRT_XML")
+          DISK=$(xmllint --xpath 'string(/domain/devices/disk/source/@file)' "$LIBVIRT_XML")
+          FMT=$(xmllint --xpath 'string(/domain/devices/disk/driver/@type)' "$LIBVIRT_XML")
+          EMULATOR=$(xmllint --xpath 'string(/domain/devices/emulator)' "$LIBVIRT_XML")
+          echo "arch=$ARCH" >> $GITHUB_OUTPUT
+          echo "machine=$MACHINE" >> $GITHUB_OUTPUT
+          echo "mem=$MEM" >> $GITHUB_OUTPUT
+          echo "vcpu=$VCPU" >> $GITHUB_OUTPUT
+          echo "disk=$DISK" >> $GITHUB_OUTPUT
+          echo "fmt=$FMT" >> $GITHUB_OUTPUT
+          echo "emulator=$EMULATOR" >> $GITHUB_OUTPUT
+          echo "VM: arch=$ARCH machine=$MACHINE mem=${MEM}MiB vcpu=$VCPU disk=$DISK fmt=$FMT"
+          echo "Emulator: $EMULATOR"
+
+      - name: Set aarch64-specific QEMU flags
+        if: contains(matrix.machine, 'aarch64')
+        run: |
+          # aarch64/virt needs explicit UEFI firmware; ubuntu package qemu-efi-aarch64
+          # installs the pflash images at a known path.
+          UEFI_CODE=/usr/share/qemu-efi-aarch64/QEMU_EFI.fd
+          if [ ! -f "$UEFI_CODE" ]; then
+            # fallback location on some distros
+            UEFI_CODE=$(find /usr/share -name 'QEMU_EFI.fd' 2>/dev/null | head -1)
+          fi
+          echo "ARCH_EXTRA=-bios $UEFI_CODE" >> $GITHUB_ENV
+
+      - name: Set x86_64-specific QEMU flags
+        if: contains(matrix.machine, 'x86_64')
+        run: echo "ARCH_EXTRA=" >> $GITHUB_ENV
+
+      - name: Start RouterOS CHR in QEMU
+        run: |
+          EMULATOR="${{ steps.vmparams.outputs.emulator }}"
+          # Fall back to PATH-discovered binary if the path from libvirt.xml doesn't exist
+          # (e.g. /usr/bin vs /usr/bin on Ubuntu — should match, but be safe)
+          if [ ! -x "$EMULATOR" ]; then
+            BINARY="qemu-system-${{ steps.vmparams.outputs.arch }}"
+            EMULATOR=$(command -v "$BINARY") || { echo "::error::$BINARY not found"; exit 1; }
+            echo "::notice::Using $EMULATOR (libvirt.xml path not found)"
+          fi
+          echo "Launching: $EMULATOR"
+          # KVM_EXTRA and ARCH_EXTRA are set by earlier steps via $GITHUB_ENV
+          # shellcheck disable=SC2086  (word-splitting is intentional for flag expansion)
+          nohup $EMULATOR \
+            $KVM_EXTRA \
+            $ARCH_EXTRA \
+            -M ${{ steps.vmparams.outputs.machine }} \
+            -m ${{ steps.vmparams.outputs.mem }} \
+            -smp ${{ steps.vmparams.outputs.vcpu }} \
+            -nographic \
+            -drive file=${{ steps.vmparams.outputs.disk }},format=${{ steps.vmparams.outputs.fmt }},if=virtio \
+            -netdev user,id=net0,hostfwd=tcp::9180-:80 \
+            -device virtio-net-pci,netdev=net0 \
+            &>/tmp/qemu-chr.log &
+          echo $! > /tmp/qemu-chr.pid
+          echo "QEMU started, PID=$(cat /tmp/qemu-chr.pid)"
+
+      - name: Wait for RouterOS REST API (up to 5 min)
+        run: |
+          echo "Waiting for RouterOS REST API at $REST_URL ..."
+          for i in $(seq 1 30); do
+            if curl -sS -m 5 --fail "$REST_URL/" > /dev/null 2>&1; then
+              echo "REST API is up after $i attempt(s)."
+              exit 0
+            fi
+            echo "Attempt $i/30: not ready, retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::RouterOS did not start within 5 minutes"
+          echo "=== QEMU log ==="
+          cat /tmp/qemu-chr.log || true
+          exit 1
+
+      - name: Verify REST API responds
+        run: curl -sS --fail "${REST_URL}/ip/address" | head -c 500
+
+      - name: Check RouterOS installation status
+        id: check-installation
+        run: |
+          RESULT=$(curl -sS --fail "${REST_URL}/system/check-installation")
+          echo "check-installation response: $RESULT"
+          STATUS=$(echo "$RESULT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status',''))")
+          echo "status=$STATUS" >> $GITHUB_OUTPUT
+          if [ "$STATUS" = "installation is ok" ]; then
+            echo "✓ RouterOS installation check passed: $STATUS"
+          else
+            echo "::error::check-installation returned unexpected status: $STATUS"
+            exit 1
+          fi
+
+      - name: Upload QEMU log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-log-${{ matrix.machine }}
+          path: /tmp/qemu-chr.log
+
+      - name: Stop QEMU
+        if: always()
+        run: |
+          if [ -f /tmp/qemu-chr.pid ]; then
+            kill "$(cat /tmp/qemu-chr.pid)" 2>/dev/null || true
+            echo "QEMU stopped."
+          fi
