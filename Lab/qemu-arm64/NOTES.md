@@ -9,8 +9,18 @@ RouterOS CHR ARM64 boots in QEMU (HTTP 200 from WebFig) but always fails
 {"detail": "damaged system package: bad image", "error": 400, "message": "Bad Request"}
 ```
 
-This failure is **reproducible on UTM (macOS)** and is NOT caused by CI configuration.
-It is an inherent RouterOS CHR ARM64 limitation in QEMU virtual environments.
+This failure is **reproducible on UTM (macOS) and QEMU (Linux CI)** and is NOT caused
+by CI configuration. It is an inherent RouterOS CHR ARM64 limitation in QEMU virtual
+environments caused by a fundamental mismatch: RouterOS **check-installation** requires
+hardware capability files in `/ram/` (populated at boot from DTB hardware info), but
+QEMU's generic `virt` machine generates only a stub `"linux,dummy-virt"` DTB that
+RouterOS cannot use to populate those files.
+
+**Bottom line — this cannot be fixed with QEMU flag tuning alone. Requires either:**
+1. A QEMU machine that RouterOS's `Marvell Armada7040` drivers can drive (not `virt`)
+2. Or MikroTik shipping a QEMU-compatible capability-file generator for CHR ARM64
+
+**CPU model does NOT matter** — tested: cortex-a53, cortex-a72, neoverse-n1 all fail identically.
 
 ---
 
@@ -62,10 +72,9 @@ UEFI (EDK2/QEMU_EFI.fd or AAVMF_CODE.fd)
 
 ---
 
-## Root Cause: kexec Device Tree Mismatch
+## Root Cause: Deep Analysis
 
-RouterOS ARM64 init script does a **kexec self-reload** as part of initialization
-(common in embedded Linux: reload kernel with correct device tree for updates/checks).
+### Phase 1 — Serial Console (kexec failure at boot)
 
 Serial console output during boot:
 ```
@@ -76,33 +85,119 @@ Cannot load /flash/boot/EFI/BOOT/BOOTAA64.EFI
 Starting services...
 ```
 
-QEMU `virt` machine generates a dynamic device tree:
+QEMU `virt` machine generates:
 ```
 model = "linux,dummy-virt";
 compatible = "linux,dummy-virt";
 ```
 
-RouterOS's kexec provides its own internal DTB (the "2nd device tree") which describes
-specific ARM64 hardware. This does NOT match the generic `linux,dummy-virt` QEMU machine,
-causing kexec to fail.
+RouterOS kexec carries its own internal DTB (embedded in `boot/kernel` ELF in the system
+NPK) for `marvell,armada7040` — this does NOT match the QEMU virt machine, so kexec fails.
 
-**check-installation detects that the kexec/EFI boot path failed and reports "bad image".**
+### Phase 2 — Binary Reverse Engineering (the real mechanism)
+
+**check-installation endpoint (REST API POST)** triggers `/bin/bash` from the NPK
+verification section. This is NOT real bash — it is a RouterOS-specific **hardware checker
+binary** (ARM32 ELF, 29,619 bytes, runs in ARM64's AArch32 compatibility mode).
+
+#### What `bin/bash` (checker) does — disassembly summary
+
+`main()` at `0x1040c` calls `check_function(ptr_to_"/ram")`:
+
+```
+check_function(0x153cc):         ; arg = { "/ram\0", "/var/pckg/\0", "installed first stage\0" }
+  open("/ram", O_RDONLY|O_DIRECTORY)     ; 0x84000 flags
+  loop: getdents64(fd, buf, 2048)        ; ARM32 syscall #217
+    for each directory entry in /ram/:
+      stat(entry)
+      if not S_IFREG: skip
+      open("/ram/<entry>")
+      read(fd, buf, 4)
+      if buf[0..3] == { 0x1e, 0xf1, 0xd0, 0xba }:  ; magic = 0xbad0f11e LE
+        → proceed to kexec boot/kernel ELF (success path)
+      else: skip
+  if no magic files found:
+    → return error → "damaged system package: bad image"
+```
+
+**Magic bytes `0x1e 0xf1 0xd0 0xba`** (= uint32_t `0xbad0f11e` little-endian) are a
+RouterOS proprietary header used by hardware capability files. These files are created in
+`/ram/` by RouterOS init at boot based on DTB hardware info.
+
+#### Key rodata strings in the checker binary
+
+| Virtual address | String |
+|---|---|
+| `0x153bc` | `/ram/syscap/` |
+| `0x153cc` | `/ram` (directory to scan) |
+| `0x153d4` | `/var/pckg/` |
+| `0x153e0` | `installed first stage` |
+| `0x15410` | `/boot` |
+| `0x15418` | `rootfs` |
+| `0x15420` | `/ram/` (path prefix) |
+
+#### What populates `/ram/` on real hardware
+
+RouterOS init parses the DTB and creates capability/hardware-descriptor files in `/ram/`
+with the magic header `0xbad0f11e`. On real Marvell Armada7040 hardware (or compatible
+DTB), these files exist. On QEMU `virt` with `acpi=on` (default), RouterOS kernel generates
+an **empty DTB** (EDK2 reports: _"EFI stub: Generating empty DTB"_), so init has no
+hardware info → `/ram/` has no capability files → checker finds no magic → fails.
+
+### Phase 3 — Why `acpi=off` doesn't help either
+
+Testing with `-machine virt,acpi=off`:
+- EDK2 reports: _"EFI stub: Using DTB from configuration table"_ ← DTB found!
+- But RouterOS then reports: _"ERROR: could not find disk!"_
+- **Root cause**: RouterOS's kernel lacks the `pci-host-ecam-generic` driver (confirmed:
+  string not present in BOOTAA64.EFI). Without DTB-based generic PCIe, RouterOS cannot
+  find the `virtio-blk-pci` disk on the QEMU virt PCIe bus.
+- RouterOS only supports PCIe via ACPI (for x86) or native Marvell PCIe (for ARM64 HW)
+
+**This creates an unresolvable dilemma:**
+- `acpi=on` → disk works, DTB empty → no `/ram/` capability files → check fails
+- `acpi=off` → DTB present, but disk not found → RouterOS can't boot from disk
+
+### Phase 4 — RouterOS kernel capabilities (confirmed)
+
+From binary analysis of BOOTAA64.EFI (11.8 MiB, Linux kernel 5.6.3):
+
+| Feature | Present? | Notes |
+|---|---|---|
+| `marvell,armada7040` | ✅ Yes | Compiled for Armada7040 platform |
+| `pci-host-ecam-generic` | ❌ No | No DTB-based generic PCIe |
+| `virtio_pci` | ✅ Yes | ACPI-based virtio (QEMU default) |
+| `virtio_mmio` | ❌ No | No MMIO virtio |
+| AArch32 compat | ✅ Yes | Can run ARM32 `bin/bash` checker |
+| kexec / kexec_file | ✅ Yes | kexec_file_load present |
+
+### Phase 5 — CPU model doesn't matter
+
+Tested CPUs (all fail identically):
+- `cortex-a53` — boot OK, check-installation: "bad image"
+- `cortex-a72` — boot OK (faster), check-installation: "bad image"  
+  (Armada7040 uses Cortex-A72; `MIDR_EL1` is NOT what the check reads)
+- `neoverse-n1` — boot OK, check-installation: "bad image" (expected)
+
+The check reads `/ram/` files with magic `0xbad0f11e`, not CPU registers.
 
 ### Why x86_64 passes check-installation
 
-x86_64 Linux does not require a device tree for kexec (DTB is an ARM concept).
-RouterOS x86_64 kexec likely does a simple kernel reload without DTB constraints.
+x86_64 Linux uses ACPI, not DTB. RouterOS x86_64 init populates its capability
+structures from ACPI tables, which QEMU provides correctly for `q35` or `i440fx`.
+No kexec DTB step required.
 
 ### Is this fixable?
 
-Potentially, but complex:
-- RouterOS's internal DTB is not exposed/configurable
-- QEMU `virt` machine type generates DTBs dynamically
-- Would require either RouterOS to ship a QEMU-compatible DTB, or a very specific
-  QEMU machine configuration that matches RouterOS's internal DTB expectations
-- MikroTik may view this as a valid limitation (CHR ARM64 intended for real ARM HW)
+**No, not with standard QEMU `virt` machine and RouterOS CHR ARM64 as shipped.**
 
-**CI should report this failure** — it's the real status of CHR ARM64 in virtualized env.
+What would be needed:
+1. QEMU would need to emulate a `marvell,armada-7040-db` machine type (does not exist)
+2. OR RouterOS would need a `pci-host-ecam-generic` driver (not compiled in)
+3. OR MikroTik would need to add QEMU-CHR-specific init path that creates capability
+   files in `/ram/` without requiring hardware DTB parsing
+
+**CI should mark this as an expected failure with explanation**, not a blocking error.
 
 ---
 
@@ -165,6 +260,46 @@ Use instead: `-display none -monitor none -chardev socket,... -serial chardev:..
 
 ---
 
-## Lab Scripts
+## Lab Scripts and Tools
 
-See `boot-test.sh` for a complete local boot test.
+### Test scripts in `Lab/qemu-arm64/`
+
+- `boot-test.sh` — complete local boot test
+- `cpu-test.sh` — multi-CPU test loop (cortex-a53, a72, etc.)
+- `single-cpu-test.sh` — single CPU model test with port argument
+- `patch-dtb.py` — DTB patcher (experimental, not proved helpful)
+
+### Important files extracted to `/tmp/` during investigation
+
+These are NOT committed (disk images/blobs are gitignored), re-extract as needed:
+
+| File | Description | How to recreate |
+|---|---|---|
+| `/tmp/system-pkg.npk` | System NPK (13.7 MiB) from ext4 partition | `debugfs -R "dump var/pdb/system/image /tmp/system-pkg.npk" /tmp/ros-root.ext4` |
+| `/tmp/npk-bin-bash-arm32.elf` | ARM32 checker binary (29,619 bytes) | Run `python3 Lab/qemu-arm64/extract-bash.py` |
+| `/tmp/virt-qemu.dtb` | QEMU virt machine DTB dump | `qemu-system-aarch64 -machine virt,dumpdtb=/tmp/virt-qemu.dtb -cpu cortex-a53 -m 256` |
+| `/tmp/ros-squash-root/` | RouterOS squashfs extracted | `unsquashfs -d /tmp/ros-squash-root /tmp/ros-system.image` |
+| `/tmp/ros-root.ext4` | Ext4 second partition (92 MiB) | `dd if=chr-7.22-arm64.img bs=512 skip=68608 of=/tmp/ros-root.ext4` |
+| `/tmp/ros-efi/EFI/BOOT/BOOTAA64.EFI` | RouterOS kernel (11.8 MiB) | Mount EFI partition (offset 2048 * 512) |
+
+### Analysis scripts in `/tmp/` (recreate from disassembly notes above)
+
+| Script | Purpose |
+|---|---|
+| `extract-bash.py` | Extracts ARM32 `bin/bash` from NPK verification section |
+| `analyze-bash-elf.py` | Maps ELF virtual addresses, finds string locations |
+| `analyze-check-arg.py` | Dumps bytes at key addresses in checker binary |
+| `disasm-main.py` | Disassembly analysis of main() and key functions |
+
+### Disassembly tools used
+
+```bash
+# ARM32 disassembly (LLVM must be installed: brew install llvm)
+/usr/local/opt/llvm/bin/llvm-objdump -d --arch-name=arm /tmp/npk-bin-bash-arm32.elf
+
+# DTB decompile (requires dtc: brew install dtc)
+dtc -I dtb -O dts /tmp/virt-qemu.dtb
+
+# Debugfs (requires e2fsprogs: brew install e2fsprogs)
+/usr/local/Cellar/e2fsprogs/*/sbin/debugfs -R "ls var/pdb/system" /tmp/ros-root.ext4
+```

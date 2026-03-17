@@ -27,11 +27,25 @@ Files/
   efi_vars.fd         ← UEFI variable store (copied into Apple-backend bundles)
   LIBVIRT.md          ← libvirt-specific documentation (see below)
 Machines/             ← build output (git-ignored except .url/.size placeholders)
+Lab/                  ← local experiments, debug scripts, investigation notes (NOT build artifacts)
+  qemu-arm64/         ← QEMU aarch64 boot investigation (see NOTES.md inside)
 .github/workflows/
   chr.yaml            ← builds and releases UTM packages to GitHub Releases
   libvirt-test.yaml   ← boots each QEMU machine in CI and checks /rest/system/check-installation
   auto.yaml           ← automated trigger for chr.yaml on new RouterOS versions
 ```
+
+## Lab/ — Local Experiments and Investigation
+
+`Lab/` is the place for local-only test scripts, investigation notes, and one-off experiments — **not production code and not part of the build**.  When debugging a hard problem (e.g. a CI failure that needs offline root-cause analysis), create a subdirectory under `Lab/` and work there:
+
+- `Lab/<topic>/NOTES.md` — findings, hypotheses, conclusions
+- `Lab/<topic>/*.sh` — reproducible test scripts  
+- `Lab/<topic>/*.py` — inspection/analysis utilities
+- Disk images (`.img`, `.qcow2`, `.vdi`) are **git-ignored** — do not commit them
+- Scripts and notes ARE tracked — commit them so future agents can resume investigation
+
+When a fix is found in `Lab/`, graduate it to the appropriate production file (workflow, Pkl module, Makefile, etc.) and document the root cause in CLAUDE.md and/or the relevant `Lab/*/NOTES.md`.
 
 ## How the Build Works
 
@@ -139,14 +153,18 @@ live migration (including Homebrew QEMU on macOS).  It was removed; `check="none
   auth).  **Never** poll `/rest/` for health — it returns HTTP 401 which causes
   `curl --fail` to exit non-zero, making RouterOS look down even when it's running
 - **`check-installation` on aarch64**: always returns HTTP 400 `"damaged system package:
-  bad image"` in QEMU (confirmed even on UTM/macOS). Root cause: RouterOS CHR ARM64
-  init does a **kexec self-reload** with its own internal device tree blob (DTB). QEMU's
-  `virt` machine provides a generic `linux,dummy-virt` DTB which RouterOS's kexec rejects
-  ("Invalid 2nd device tree"). The kexec failure is logged in the serial console and
-  causes check-installation to report the image as damaged. RouterOS continues booting
-  normally (HTTP 200 works) — only the kexec-dependent check fails. This is a RouterOS
-  limitation; the CI correctly reports it as a failure so we know when/if it is fixed.
-  See `Lab/qemu-arm64/NOTES.md` for full analysis.
+  bad image"` in QEMU (confirmed even on UTM/macOS). Root cause (fully reverse-engineered):
+  RouterOS `check-installation` REST POST runs an ARM32 ELF binary (`bin/bash` from the
+  NPK verification section — NOT real bash). This binary scans `/ram/` for regular files
+  with magic header `0x1e 0xf1 0xd0 0xba` (`0xbad0f11e` LE). These capability files are
+  created by RouterOS init by parsing hardware DTB info at boot. On QEMU `virt` with
+  `acpi=on` (default), EDK2 generates an **empty DTB** ("EFI stub: Generating empty DTB")
+  → RouterOS init has no hardware info → no `/ram/` capability files → checker fails.
+  With `acpi=off`, DTB is present but RouterOS kernel lacks `pci-host-ecam-generic` driver
+  → disk not found. Either way, check-installation cannot pass. CPU model is irrelevant
+  (cortex-a53, cortex-a72, neoverse-n1 all fail identically). RouterOS continues booting
+  normally (HTTP 200 works) — only the capability-file check fails. See
+  `Lab/qemu-arm64/NOTES.md` for full analysis and binary reverse engineering details.
 - **API calls**: use `http://admin:@localhost:9180/rest/…` (empty password = RouterOS default)
 - **ROSE machines**: libvirt.xml contains multiple `<disk>` entries.  The workflow
   extracts ALL disks via `xmllint` loop and passes each as a separate QEMU `-drive` flag
