@@ -89,7 +89,8 @@ function domain(
   osBlock(architecture) +
   "  <features>\n" +
   "    <acpi/>\n" +
-  "    <apic/>\n" +
+  // aarch64 uses GIC (Generic Interrupt Controller), not x86 APIC
+  (if (architecture == "aarch64") "" else "    <apic/>\n") +
   "  </features>\n" +
   "  <cpu mode=\"host-passthrough\" check=\"none\"/>\n" +
   "  <devices>\n" +

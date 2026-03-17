@@ -165,19 +165,19 @@ jobs:
           if [ "$KVM_AVAIL" = "1" ]; then
             echo "QEMU_KVM_FLAGS=-enable-kvm" >> $GITHUB_ENV
             echo "QEMU_CPU_FLAGS=-cpu host"   >> $GITHUB_ENV
-            # KVM is fast enough; 5 min / 30 attempts × 10s
-            echo "BOOT_TIMEOUT_ATTEMPTS=30"   >> $GITHUB_ENV
+            # KVM is fast: RouterOS typically up in 15-45s; allow 2 min
+            echo "BOOT_TIMEOUT_ATTEMPTS=12"   >> $GITHUB_ENV
           else
             echo "QEMU_KVM_FLAGS="            >> $GITHUB_ENV
             if [ "$ARCH" = "aarch64" ]; then
               # aarch64 TCG requires an explicit CPU model; 'max' enables all features
               echo "QEMU_CPU_FLAGS=-cpu max"  >> $GITHUB_ENV
-              # Software emulation is slower — allow 10 min / 60 attempts × 10s
-              echo "BOOT_TIMEOUT_ATTEMPTS=60" >> $GITHUB_ENV
+              # Software emulation is slower — allow 4 min / 24 attempts × 10s
+              echo "BOOT_TIMEOUT_ATTEMPTS=24" >> $GITHUB_ENV
             else
               # x86_64 TCG uses a reasonable default; no flag needed
               echo "QEMU_CPU_FLAGS="          >> $GITHUB_ENV
-              echo "BOOT_TIMEOUT_ATTEMPTS=48" >> $GITHUB_ENV
+              echo "BOOT_TIMEOUT_ATTEMPTS=18" >> $GITHUB_ENV
             fi
           fi
 
@@ -194,8 +194,27 @@ jobs:
               echo "::error::No UEFI firmware found for aarch64 — install qemu-efi-aarch64"
               exit 1
             fi
-            echo "QEMU_UEFI_FLAGS=-bios $UEFI_CODE" >> $GITHUB_ENV
-            echo "UEFI firmware: $UEFI_CODE"
+            # Use pflash mode (not -bios) so UEFI has a writable NVRAM (pflash1).
+            # -bios only provides the code ROM with no writable variable store, which
+            # can prevent EDK2 from completing initialisation on newer QEMU versions.
+            UEFI_VARS_SRC=""
+            for v in \
+              /usr/share/qemu-efi-aarch64/QEMU_VARS.fd \
+              /usr/share/AAVMF/AAVMF_VARS.fd \
+              /usr/share/edk2/aarch64/QEMU_VARS.fd; do
+              if [ -f "$v" ]; then UEFI_VARS_SRC="$v"; break; fi
+            done
+            if [ -n "$UEFI_VARS_SRC" ]; then
+              cp "$UEFI_VARS_SRC" /tmp/qemu-efi-vars.fd
+              echo "UEFI vars: $UEFI_VARS_SRC -> /tmp/qemu-efi-vars.fd"
+            else
+              # Create an empty vars file matching the code file size (standard EDK2 layout)
+              truncate -s "$(stat -c%s "$UEFI_CODE")" /tmp/qemu-efi-vars.fd
+              echo "::warning::No UEFI VARS file found; created empty placeholder"
+            fi
+            # pflash unit=0 → code (read-only), unit=1 → vars (writable)
+            echo "QEMU_UEFI_FLAGS=-drive if=pflash,format=raw,readonly=on,unit=0,file=$UEFI_CODE -drive if=pflash,format=raw,unit=1,file=/tmp/qemu-efi-vars.fd" >> $GITHUB_ENV
+            echo "UEFI firmware: $UEFI_CODE (code) + /tmp/qemu-efi-vars.fd (vars)"
           else
             echo "QEMU_UEFI_FLAGS=" >> $GITHUB_ENV
           fi

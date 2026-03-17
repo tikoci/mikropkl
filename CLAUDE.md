@@ -116,13 +116,17 @@ live migration (including Homebrew QEMU on macOS).  It was removed; `check="none
   KVM is available on `ubuntu-latest`; availability on `ubuntu-24.04-arm` varies.
 - Without KVM on aarch64: must pass `-cpu max` explicitly — `qemu-system-aarch64 -M virt`
   without a CPU spec will fail immediately in TCG mode
+- **aarch64 UEFI**: uses `-drive if=pflash,unit=0` (code, read-only) + `unit=1` (vars,
+  writable copy of `QEMU_VARS.fd`). Do NOT use `-bios QEMU_EFI.fd` — newer EDK2 builds
+  require a writable pflash1 for NVRAM; `-bios` only provides read-only code ROM and
+  can prevent UEFI from completing initialisation.
 - **Health check**: polls `http://localhost:9180/` (WebFig root, returns HTTP 200 without
   auth).  **Never** poll `/rest/` for health — it returns HTTP 401 which causes
   `curl --fail` to exit non-zero, making RouterOS look down even when it's running
 - **API calls**: use `http://admin:@localhost:9180/rest/…` (empty password = RouterOS default)
 - **ROSE machines**: libvirt.xml contains multiple `<disk>` entries.  The workflow
   extracts ALL disks via `xmllint` loop and passes each as a separate QEMU `-drive` flag
-- **Timeouts**: x86_64 without KVM = 8 min; aarch64 without KVM = 10 min
+- **Timeouts**: KVM (any arch) = 2 min; x86_64 without KVM = 3 min; aarch64 without KVM = 4 min
 
 ### Port forwarding
 `libvirt.xml` uses `<interface type="user">` (SLIRP), which does not support port
