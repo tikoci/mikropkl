@@ -158,7 +158,7 @@ jobs:
           echo "Emulator: $EMULATOR"
 
       - name: Configure arch- and KVM-specific QEMU flags
-        # Sets QEMU_KVM_FLAGS, QEMU_CPU_FLAGS, QEMU_UEFI_FLAGS, BOOT_TIMEOUT_ATTEMPTS
+        # Sets QEMU_KVM_FLAGS, QEMU_CPU_FLAGS, QEMU_UEFI_FLAGS, QEMU_MISC_FLAGS, BOOT_TIMEOUT_ATTEMPTS
         run: |
           ARCH="${{ steps.vmparams.outputs.arch }}"
 
@@ -219,18 +219,37 @@ jobs:
             echo "QEMU_UEFI_FLAGS=" >> $GITHUB_ENV
           fi
 
+          # Disable VGA device on aarch64: RouterOS has display driver issues on ARM
+          # (matches UTM config which sets Display to empty array on aarch64)
+          if [ "$ARCH" = "aarch64" ]; then
+            echo "QEMU_MISC_FLAGS=-vga none" >> $GITHUB_ENV
+          else
+            echo "QEMU_MISC_FLAGS=" >> $GITHUB_ENV
+          fi
+
       - name: Build QEMU drive flags from libvirt.xml
-        # Extracts ALL disk entries so ROSE multi-disk machines mount all volumes
+        # Extracts ALL disk entries so ROSE multi-disk machines mount all volumes.
+        # aarch64: RouterOS CHR requires NVMe disk interface — matches UTM config.plist
+        #   Interface=NVMe for aarch64. Uses -drive if=none + -device nvme per drive.
+        # x86_64: standard VirtIO works fine.
         id: driveflags
         run: |
+          ARCH="${{ steps.vmparams.outputs.arch }}"
           DRIVE_FLAGS=""
           COUNT="${{ steps.vmparams.outputs.disk_count }}"
-          echo "Mounting $COUNT disk(s):"
+          echo "Mounting $COUNT disk(s) (arch=$ARCH):"
           for idx in $(seq 1 "$COUNT"); do
             FILE=$(xmllint --xpath "string(/domain/devices/disk[$idx]/source/@file)" "$LIBVIRT_XML" 2>/dev/null)
             FMT=$(xmllint --xpath  "string(/domain/devices/disk[$idx]/driver/@type)"  "$LIBVIRT_XML" 2>/dev/null)
             echo "  disk $idx: $FILE (format=$FMT)"
-            DRIVE_FLAGS="$DRIVE_FLAGS -drive file=$FILE,format=$FMT,if=virtio"
+            if [ "$ARCH" = "aarch64" ]; then
+              # RouterOS CHR on aarch64 won't see virtio disks — NVMe required
+              NVME_IDX=$((idx - 1))
+              DRIVE_FLAGS="$DRIVE_FLAGS -drive file=$FILE,format=$FMT,if=none,id=nvme$NVME_IDX"
+              DRIVE_FLAGS="$DRIVE_FLAGS -device nvme,drive=nvme$NVME_IDX,serial=nvme$NVME_IDX"
+            else
+              DRIVE_FLAGS="$DRIVE_FLAGS -drive file=$FILE,format=$FMT,if=virtio"
+            fi
           done
           # Trim leading space
           DRIVE_FLAGS="${DRIVE_FLAGS# }"
@@ -261,11 +280,13 @@ jobs:
           echo "  drives  : ${{ steps.driveflags.outputs.drive_flags }}"
           echo "  kvm     : $QEMU_KVM_FLAGS $QEMU_CPU_FLAGS"
           echo "  uefi    : $QEMU_UEFI_FLAGS"
+          echo "  misc    : $QEMU_MISC_FLAGS"
           # shellcheck disable=SC2086  (word-splitting intentional for flag expansion)
           nohup $EMULATOR \
             $QEMU_KVM_FLAGS \
             $QEMU_CPU_FLAGS \
             $QEMU_UEFI_FLAGS \
+            $QEMU_MISC_FLAGS \
             -M ${{ steps.vmparams.outputs.machine }} \
             -m ${{ steps.vmparams.outputs.mem }} \
             -smp ${{ steps.vmparams.outputs.vcpu }} \
