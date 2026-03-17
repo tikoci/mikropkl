@@ -122,7 +122,7 @@ jobs:
       - name: Enable KVM
         # Apply udev rules first (required to make /dev/kvm user-accessible),
         # then check if KVM is actually usable. Matches the pattern from reference
-        # workflows (appyamlschemas.yaml). KVM is available on ubuntu-latest (x86_64)
+        # workflows. KVM is available on ubuntu-latest (x86_64)
         # but may not be on ubuntu-24.04-arm — udevadm trigger can fail there,
         # so we must tolerate that failure and fall back to software emulation.
         run: |
