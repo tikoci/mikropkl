@@ -170,8 +170,9 @@ jobs:
           else
             echo "QEMU_KVM_FLAGS="            >> $GITHUB_ENV
             if [ "$ARCH" = "aarch64" ]; then
-              # aarch64 TCG requires an explicit CPU model; 'max' enables all features
-              echo "QEMU_CPU_FLAGS=-cpu max"  >> $GITHUB_ENV
+              # aarch64 TCG: cortex-a710 matches UTM config.plist CPU setting and is
+              # the CPU model RouterOS CHR ARM64 is validated against
+              echo "QEMU_CPU_FLAGS=-cpu cortex-a710" >> $GITHUB_ENV
               # Software emulation is slower — allow 4 min / 24 attempts × 10s
               echo "BOOT_TIMEOUT_ATTEMPTS=24" >> $GITHUB_ENV
             else
@@ -229,9 +230,11 @@ jobs:
 
       - name: Build QEMU drive flags from libvirt.xml
         # Extracts ALL disk entries so ROSE multi-disk machines mount all volumes.
-        # aarch64: RouterOS CHR requires NVMe disk interface — matches UTM config.plist
-        #   Interface=NVMe for aarch64. Uses -drive if=none + -device nvme per drive.
-        # x86_64: standard VirtIO works fine.
+        # aarch64: Use explicit virtio-blk-pci device (if=none + -device virtio-blk-pci).
+        #   UTM's ps output confirms this is what works: virtio-blk-pci not NVMe,
+        #   and not the if=virtio shorthand which resolves to virtio-blk-device (MMIO)
+        #   rather than the PCI variant on the virt machine type.
+        # x86_64: standard if=virtio shorthand is fine on q35.
         id: driveflags
         run: |
           ARCH="${{ steps.vmparams.outputs.arch }}"
@@ -241,12 +244,12 @@ jobs:
           for idx in $(seq 1 "$COUNT"); do
             FILE=$(xmllint --xpath "string(/domain/devices/disk[$idx]/source/@file)" "$LIBVIRT_XML" 2>/dev/null)
             FMT=$(xmllint --xpath  "string(/domain/devices/disk[$idx]/driver/@type)"  "$LIBVIRT_XML" 2>/dev/null)
+            DRV_ID="drive$idx"
             echo "  disk $idx: $FILE (format=$FMT)"
             if [ "$ARCH" = "aarch64" ]; then
-              # RouterOS CHR on aarch64 won't see virtio disks — NVMe required
-              NVME_IDX=$((idx - 1))
-              DRIVE_FLAGS="$DRIVE_FLAGS -drive file=$FILE,format=$FMT,if=none,id=nvme$NVME_IDX"
-              DRIVE_FLAGS="$DRIVE_FLAGS -device nvme,drive=nvme$NVME_IDX,serial=nvme$NVME_IDX"
+              # Explicit virtio-blk-pci: matches UTM QEMU args exactly
+              DRIVE_FLAGS="$DRIVE_FLAGS -drive file=$FILE,format=$FMT,if=none,id=$DRV_ID"
+              DRIVE_FLAGS="$DRIVE_FLAGS -device virtio-blk-pci,drive=$DRV_ID,bootindex=$((idx - 1))"
             else
               DRIVE_FLAGS="$DRIVE_FLAGS -drive file=$FILE,format=$FMT,if=virtio"
             fi
@@ -297,6 +300,21 @@ jobs:
             &>/tmp/qemu-chr.log &
           echo $! > /tmp/qemu-chr.pid
           echo "QEMU PID=$(cat /tmp/qemu-chr.pid)"
+
+      - name: Show early QEMU boot output
+        # Wait 15s then dump whatever QEMU has logged — catches immediate crashes
+        # (bad firmware, wrong disk interface, missing file) before the health poll.
+        run: |
+          sleep 15
+          echo "=== QEMU log (first 100 lines, 15s after start) ==="
+          head -100 /tmp/qemu-chr.log || true
+          echo "=== QEMU process check ==="
+          if kill -0 "$(cat /tmp/qemu-chr.pid 2>/dev/null)" 2>/dev/null; then
+            echo "QEMU is still running."
+          else
+            echo "::error::QEMU process has already exited — check log above"
+            exit 1
+          fi
 
       - name: Wait for RouterOS HTTP server to respond
         # Poll the WebFig root (returns HTTP 200 without credentials).
