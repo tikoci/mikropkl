@@ -2,7 +2,8 @@ name: "Test: Libvirt / QEMU Boot"
 
 # Builds each QEMU manifest and boots it under qemu-system on arch-specific
 # GitHub runners to verify RouterOS starts successfully.
-# Verification: GET /rest/system/check-installation returns {"status":"installation is ok"}
+# Verification: POST /rest/system/check-installation with {"duration":"30s"} must
+# return an array whose last element has {"status":"installation is ok"}
 #
 # Does NOT publish a release or push tags. CI-only.
 
@@ -122,12 +123,13 @@ jobs:
         # Apply udev rules first (required to make /dev/kvm user-accessible),
         # then check if KVM is actually usable. Matches the pattern from reference
         # workflows (appyamlschemas.yaml). KVM is available on ubuntu-latest (x86_64)
-        # and typically on ubuntu-24.04-arm too.
+        # but may not be on ubuntu-24.04-arm — udevadm trigger can fail there,
+        # so we must tolerate that failure and fall back to software emulation.
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
+          sudo udevadm trigger --name-match=kvm || true
           if ls -la /dev/kvm 2>/dev/null; then
             echo "KVM_AVAIL=1" >> $GITHUB_ENV
             echo "KVM is available."
@@ -284,27 +286,37 @@ jobs:
 
       - name: Check RouterOS installation status
         id: check-installation
+        # check-installation is a POST; "duration" tells RouterOS how long to run
+        # the disk/filesystem check.  It returns intermediate progress plus a final
+        # result as a JSON array — we check the last element for "installation is ok".
         run: |
-          echo "Calling $API_BASE/system/check-installation ..."
-          RESULT=$(curl -sS --fail "$API_BASE/system/check-installation" || echo '{}')
+          echo "Calling $API_BASE/system/check-installation (POST with duration=30s) ..."
+          RESULT=$(curl -sS --fail -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"duration":"30s"}' \
+            "$API_BASE/system/check-installation")
           echo "Response: $RESULT"
-          STATUS=$(echo "$RESULT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null || echo "")
+          STATUS=$(echo "$RESULT" | python3 -c "
+          import sys, json
+          try:
+              data = json.load(sys.stdin)
+          except json.JSONDecodeError as e:
+              print('ERROR: invalid JSON: ' + str(e), file=sys.stderr)
+              sys.exit(1)
+          if isinstance(data, list) and len(data) > 0:
+              print(data[-1].get('status', ''))
+          elif isinstance(data, dict):
+              print(data.get('status', ''))
+          else:
+              print('ERROR: unexpected response type: ' + type(data).__name__, file=sys.stderr)
+              sys.exit(1)
+          ")
           echo "status=$STATUS" >> $GITHUB_OUTPUT
           if [ "$STATUS" = "installation is ok" ]; then
             echo "RouterOS installation check passed: $STATUS"
           else
-            echo "::warning::check-installation status: '$STATUS' (may be unsupported on this version)"
-            # Fallback: confirm REST identity endpoint works as a liveness check
-            echo "Falling back to /system/identity ..."
-            IDENTITY=$(curl -sS --fail "$API_BASE/system/identity" || echo '{}')
-            echo "Identity: $IDENTITY"
-            NAME=$(echo "$IDENTITY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('name',''))" 2>/dev/null || echo "")
-            if [ -n "$NAME" ]; then
-              echo "RouterOS is running. Identity name: $NAME"
-            else
-              echo "::error::RouterOS REST API unresponsive or returned unexpected data"
-              exit 1
-            fi
+            echo "::error::check-installation failed — status: '$STATUS'"
+            exit 1
           fi
 
       - name: Upload QEMU log on failure
