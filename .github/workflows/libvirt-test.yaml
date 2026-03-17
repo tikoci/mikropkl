@@ -224,10 +224,17 @@ jobs:
                 if [ -f "$v" ]; then UEFI_VARS_SRC="$v"; break; fi
               done
             fi
-            CODE_SIZE=$(stat -c%s "$UEFI_CODE")
+            CODE_SIZE=$(stat -Lc%s "$UEFI_CODE")
+            # Sanity check: UEFI code ROM must be at least 1 MiB (real firmware is 64 MiB).
+            # A tiny size likely means stat read a symlink's path length instead of the target.
+            if [ "$CODE_SIZE" -lt 1048576 ]; then
+              echo "::error::UEFI code ROM $UEFI_CODE is only $CODE_SIZE bytes — expected ~64 MiB. Is it a broken symlink?"
+              ls -la "$UEFI_CODE"
+              exit 1
+            fi
             if [ -n "$UEFI_VARS_SRC" ]; then
               cp "$UEFI_VARS_SRC" /tmp/qemu-efi-vars.fd
-              echo "UEFI vars: $UEFI_VARS_SRC ($(stat -c%s "$UEFI_VARS_SRC") bytes) -> /tmp/qemu-efi-vars.fd"
+              echo "UEFI vars: $UEFI_VARS_SRC ($(stat -Lc%s "$UEFI_VARS_SRC") bytes) -> /tmp/qemu-efi-vars.fd"
             else
               echo "::warning::No UEFI VARS file found; creating empty placeholder"
               touch /tmp/qemu-efi-vars.fd
@@ -304,11 +311,11 @@ jobs:
           echo "=== Disk files ==="
           ls -la ./Machines/${{ matrix.machine }}/Data/ || true
           if [ "$ARCH" = "aarch64" ]; then
-            echo "=== UEFI firmware files ==="
-            ls -la /usr/share/qemu-efi-aarch64/ 2>/dev/null || true
-            ls -la /usr/share/AAVMF/ 2>/dev/null || true
+            echo "=== UEFI firmware files (follow symlinks) ==="
+            ls -laL /usr/share/qemu-efi-aarch64/ 2>/dev/null || true
+            ls -laL /usr/share/AAVMF/ 2>/dev/null || true
             echo "=== pflash vars file ==="
-            ls -la /tmp/qemu-efi-vars.fd 2>/dev/null || echo "No vars file yet"
+            ls -laL /tmp/qemu-efi-vars.fd 2>/dev/null || echo "No vars file yet"
           fi
           echo "=== QEMU binary ==="
           qemu-system-$ARCH --version 2>/dev/null | head -1 || true

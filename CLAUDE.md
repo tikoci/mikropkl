@@ -293,6 +293,10 @@ live migration (including Homebrew QEMU on macOS).  It was removed; `check="none
   `QEMU_EFI.fd` at only **2 MiB** — this is a compact variant unsuitable as the code ROM.
   Prefer `AAVMF_CODE.fd` + `AAVMF_VARS.fd` (both 64 MiB, from `qemu-efi-aarch64` package
   at `/usr/share/AAVMF/`). The workflow searches AAVMF first, then QEMU_EFI.fd as fallback.
+  **IMPORTANT**: On `ubuntu-24.04-arm`, `AAVMF_CODE.fd` is a **symlink** (e.g. to
+  `AAVMF_CODE.no-secboot.fd`).  Use `stat -Lc%s` (not `stat -c%s`) to get the real
+  file size — without `-L`, `stat` returns the symlink target path length (~24 bytes)
+  instead of the actual 64 MiB ROM size, causing pflash size mismatches.
 - **aarch64 disks**: use `-drive if=none,id=driveN -device virtio-blk-pci,drive=driveN`.
   UTM maps its plist `Interface=NVMe` to `virtio-blk-pci` (NOT actual NVMe), and the
   `if=virtio` shorthand resolves to `virtio-blk-device` (MMIO) on the virt machine type,

@@ -82,10 +82,12 @@ The pkl module hardcodes `Hardware = "virtio-net-pci"` in the Network config.
 | macOS Apple Silicon | `/opt/homebrew/share/qemu/edk2-aarch64-code.fd` | `edk2-arm-vars.fd` | 64 MiB each | Properly paired |
 | macOS Intel (x86 OVMF) | `/usr/local/share/qemu/edk2-x86_64-code.fd` | `edk2-i386-vars.fd` | 64 MiB each | For x86 UEFI testing |
 | Ubuntu x86 runner | `/usr/share/AAVMF/AAVMF_CODE.fd` | `AAVMF_VARS.fd` | 64 MiB each | Preferred on CI |
-| Ubuntu ARM runner | `/usr/share/AAVMF/AAVMF_CODE.fd` | `AAVMF_VARS.fd` | 64 MiB each | **Avoid** `QEMU_EFI.fd` (2 MiB) |
+| Ubuntu ARM runner | `/usr/share/AAVMF/AAVMF_CODE.fd` | `AAVMF_VARS.fd` | 64 MiB each | **Symlink** — use `stat -Lc%s`; avoid `QEMU_EFI.fd` (2 MiB) |
 
 **Critical**: Both pflash units (code + vars) must be identical size.  Use `truncate -s`
-to pad/trim the vars file to match the code ROM.
+to pad/trim the vars file to match the code ROM.  On `ubuntu-24.04-arm`, `AAVMF_CODE.fd`
+is a **symlink** (to `AAVMF_CODE.no-secboot.fd`).  Always use `stat -Lc%s` (with `-L`)
+to get the real file size — without `-L`, `stat` returns the symlink path length (~24 bytes).
 
 ## Planned Work Items
 
