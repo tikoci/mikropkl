@@ -205,14 +205,17 @@ jobs:
               /usr/share/edk2/aarch64/QEMU_VARS.fd; do
               if [ -f "$v" ]; then UEFI_VARS_SRC="$v"; break; fi
             done
+            CODE_SIZE=$(stat -c%s "$UEFI_CODE")
             if [ -n "$UEFI_VARS_SRC" ]; then
               cp "$UEFI_VARS_SRC" /tmp/qemu-efi-vars.fd
               echo "UEFI vars: $UEFI_VARS_SRC -> /tmp/qemu-efi-vars.fd"
             else
-              # Create an empty vars file matching the code file size (standard EDK2 layout)
-              truncate -s "$(stat -c%s "$UEFI_CODE")" /tmp/qemu-efi-vars.fd
-              echo "::warning::No UEFI VARS file found; created empty placeholder"
+              echo "::warning::No UEFI VARS file found; creating empty placeholder"
             fi
+            # Both pflash units must be identical size. Truncate/pad vars to match
+            # the code ROM (QEMU_EFI.fd is 64 MiB on Ubuntu; QEMU_VARS.fd may be 2 MiB).
+            truncate -s "$CODE_SIZE" /tmp/qemu-efi-vars.fd
+            echo "UEFI vars file size set to $CODE_SIZE bytes (matches code ROM)"
             # pflash unit=0 → code (read-only), unit=1 → vars (writable)
             echo "QEMU_UEFI_FLAGS=-drive if=pflash,format=raw,readonly=on,unit=0,file=$UEFI_CODE -drive if=pflash,format=raw,unit=1,file=/tmp/qemu-efi-vars.fd" >> $GITHUB_ENV
             echo "UEFI firmware: $UEFI_CODE (code) + /tmp/qemu-efi-vars.fd (vars)"
