@@ -114,12 +114,23 @@ live migration (including Homebrew QEMU on macOS).  It was removed; `check="none
 - Installs `qemu-system-arm` or `qemu-system-x86` (no full libvirt daemon needed)
 - **KVM setup**: Always applies udev rule first, THEN checks `/dev/kvm` accessibility.
   KVM is available on `ubuntu-latest`; availability on `ubuntu-24.04-arm` varies.
-- Without KVM on aarch64: must pass `-cpu max` explicitly — `qemu-system-aarch64 -M virt`
-  without a CPU spec will fail immediately in TCG mode
+- Without KVM on aarch64: must pass `-cpu cortex-a710` — matches the UTM config.plist
+  CPU setting and is the model RouterOS CHR ARM64 is validated against.
+  Also pass `-accel tcg,tb-size=256` for TCG performance.
 - **aarch64 UEFI**: uses `-drive if=pflash,unit=0` (code, read-only) + `unit=1` (vars,
   writable copy of `QEMU_VARS.fd`). Do NOT use `-bios QEMU_EFI.fd` — newer EDK2 builds
   require a writable pflash1 for NVRAM; `-bios` only provides read-only code ROM and
   can prevent UEFI from completing initialisation.
+  Both pflash units must be identical in size — truncate/pad the vars file to match
+  the code ROM (typically 64 MiB on Ubuntu).
+- **aarch64 disks**: use `-drive if=none,id=driveN -device virtio-blk-pci,drive=driveN`.
+  UTM maps its plist `Interface=NVMe` to `virtio-blk-pci` (NOT actual NVMe), and the
+  `if=virtio` shorthand resolves to `virtio-blk-device` (MMIO) on the virt machine type,
+  which is not what works.
+- **Display / serial**: Do NOT use `-nographic` when QEMU is backgrounded — it redirects
+  serial to stdio, which blocks indefinitely without an interactive terminal.  Use
+  `-display none -monitor none -chardev socket,...,server=on,wait=off -serial chardev:...`
+  instead.
 - **Health check**: polls `http://localhost:9180/` (WebFig root, returns HTTP 200 without
   auth).  **Never** poll `/rest/` for health — it returns HTTP 401 which causes
   `curl --fail` to exit non-zero, making RouterOS look down even when it's running

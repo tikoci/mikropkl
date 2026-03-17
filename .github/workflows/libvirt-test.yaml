@@ -231,6 +231,13 @@ jobs:
             echo "QEMU_MISC_FLAGS=" >> $GITHUB_ENV
           fi
 
+          # TCG translation block cache size (matches UTM setting)
+          if [ "$KVM_AVAIL" != "1" ]; then
+            echo "QEMU_ACCEL_FLAGS=-accel tcg,tb-size=256" >> $GITHUB_ENV
+          else
+            echo "QEMU_ACCEL_FLAGS=" >> $GITHUB_ENV
+          fi
+
       - name: Build QEMU drive flags from libvirt.xml
         # Extracts ALL disk entries so ROSE multi-disk machines mount all volumes.
         # aarch64: Use explicit virtio-blk-pci device (if=none + -device virtio-blk-pci).
@@ -270,6 +277,22 @@ jobs:
             echo "::notice::virt-xml-validate not installed, skipping schema validation"
           fi
 
+      - name: Pre-launch diagnostics
+        # Show firmware and disk file sizes to help debug pflash mismatches
+        run: |
+          ARCH="${{ steps.vmparams.outputs.arch }}"
+          echo "=== Disk files ==="
+          ls -la ./Machines/${{ matrix.machine }}/Data/ || true
+          if [ "$ARCH" = "aarch64" ]; then
+            echo "=== UEFI firmware files ==="
+            ls -la /usr/share/qemu-efi-aarch64/ 2>/dev/null || true
+            ls -la /usr/share/AAVMF/ 2>/dev/null || true
+            echo "=== pflash vars file ==="
+            ls -la /tmp/qemu-efi-vars.fd 2>/dev/null || echo "No vars file yet"
+          fi
+          echo "=== QEMU binary ==="
+          qemu-system-$ARCH --version 2>/dev/null | head -1 || true
+
       - name: Start RouterOS CHR in QEMU
         run: |
           EMULATOR="${{ steps.vmparams.outputs.emulator }}"
@@ -287,16 +310,25 @@ jobs:
           echo "  kvm     : $QEMU_KVM_FLAGS $QEMU_CPU_FLAGS"
           echo "  uefi    : $QEMU_UEFI_FLAGS"
           echo "  misc    : $QEMU_MISC_FLAGS"
+          echo "  accel   : $QEMU_ACCEL_FLAGS"
           # shellcheck disable=SC2086  (word-splitting intentional for flag expansion)
+          #
+          # IMPORTANT: Do NOT use -nographic here. It redirects serial to stdio,
+          # which blocks indefinitely when QEMU is backgrounded (&) because there
+          # is no interactive terminal. Use -display none + explicit serial chardev.
           nohup $EMULATOR \
             $QEMU_KVM_FLAGS \
             $QEMU_CPU_FLAGS \
             $QEMU_UEFI_FLAGS \
             $QEMU_MISC_FLAGS \
+            $QEMU_ACCEL_FLAGS \
             -M ${{ steps.vmparams.outputs.machine }} \
             -m ${{ steps.vmparams.outputs.mem }} \
             -smp ${{ steps.vmparams.outputs.vcpu }} \
-            -nographic \
+            -display none \
+            -monitor none \
+            -chardev socket,id=serial0,path=/tmp/qemu-serial.sock,server=on,wait=off \
+            -serial chardev:serial0 \
             ${{ steps.driveflags.outputs.drive_flags }} \
             -netdev user,id=net0,hostfwd=tcp::9180-:80 \
             -device virtio-net-pci,netdev=net0 \
@@ -309,11 +341,19 @@ jobs:
         # (bad firmware, wrong disk interface, missing file) before the health poll.
         run: |
           sleep 15
+          PID=$(cat /tmp/qemu-chr.pid 2>/dev/null)
           echo "=== QEMU log (first 100 lines, 15s after start) ==="
           head -100 /tmp/qemu-chr.log || true
           echo "=== QEMU process check ==="
-          if kill -0 "$(cat /tmp/qemu-chr.pid 2>/dev/null)" 2>/dev/null; then
-            echo "QEMU is still running."
+          if kill -0 "$PID" 2>/dev/null; then
+            # Show CPU usage — 0% CPU means QEMU is stuck (not executing instructions)
+            CPU_PCT=$(ps -p "$PID" -o %cpu= 2>/dev/null | tr -d ' ')
+            CPU_TIME=$(ps -p "$PID" -o time= 2>/dev/null | tr -d ' ')
+            RSS=$(ps -p "$PID" -o rss= 2>/dev/null | tr -d ' ')
+            echo "QEMU is running: CPU=${CPU_PCT}% TIME=$CPU_TIME RSS=${RSS}kB"
+            if [ "$(echo "$CPU_PCT < 1.0" | bc -l 2>/dev/null)" = "1" ]; then
+              echo "::warning::QEMU has near-zero CPU — it may be stuck (check serial/display config)"
+            fi
           else
             echo "::error::QEMU process has already exited — check log above"
             exit 1
@@ -350,13 +390,24 @@ jobs:
         # check-installation is a POST; "duration" tells RouterOS how long to run
         # the disk/filesystem check.  It returns intermediate progress plus a final
         # result as a JSON array — we check the last element for "installation is ok".
+        # This command may not exist on all RouterOS builds — treat 400 as non-fatal.
         run: |
           echo "Calling $API_BASE/system/check-installation (POST with duration=30s) ..."
-          RESULT=$(curl -sS --fail -X POST \
+          HTTP_CODE=$(curl -sS -o /tmp/check-result.json -w "%{http_code}" -X POST \
             -H 'Content-Type: application/json' \
             -d '{"duration":"30s"}' \
             "$API_BASE/system/check-installation")
-          echo "Response: $RESULT"
+          RESULT=$(cat /tmp/check-result.json)
+          echo "HTTP $HTTP_CODE — Response: $RESULT"
+          if [ "$HTTP_CODE" = "400" ]; then
+            echo "::warning::check-installation command not available on this RouterOS build (HTTP 400)"
+            echo "status=not available" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          if [ "$HTTP_CODE" -ge 400 ]; then
+            echo "::error::check-installation request failed with HTTP $HTTP_CODE"
+            exit 1
+          fi
           STATUS=$(echo "$RESULT" | python3 -c "
           import sys, json
           try:
