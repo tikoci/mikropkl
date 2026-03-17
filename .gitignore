@@ -1,2 +1,6 @@
 Machines
 .DS_Store
+Lab/**/*.img
+Lab/**/*.vdi
+Lab/**/*.qcow2
+Lab/**/*.iso

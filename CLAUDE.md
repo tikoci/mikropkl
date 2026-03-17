@@ -123,6 +123,10 @@ live migration (including Homebrew QEMU on macOS).  It was removed; `check="none
   can prevent UEFI from completing initialisation.
   Both pflash units must be identical in size — truncate/pad the vars file to match
   the code ROM (typically 64 MiB on Ubuntu).
+  **IMPORTANT**: On `ubuntu-24.04-arm` (native ARM runner), `qemu-efi-aarch64` installs
+  `QEMU_EFI.fd` at only **2 MiB** — this is a compact variant unsuitable as the code ROM.
+  Prefer `AAVMF_CODE.fd` + `AAVMF_VARS.fd` (both 64 MiB, from `qemu-efi-aarch64` package
+  at `/usr/share/AAVMF/`). The workflow searches AAVMF first, then QEMU_EFI.fd as fallback.
 - **aarch64 disks**: use `-drive if=none,id=driveN -device virtio-blk-pci,drive=driveN`.
   UTM maps its plist `Interface=NVMe` to `virtio-blk-pci` (NOT actual NVMe), and the
   `if=virtio` shorthand resolves to `virtio-blk-device` (MMIO) on the virt machine type,
@@ -134,6 +138,15 @@ live migration (including Homebrew QEMU on macOS).  It was removed; `check="none
 - **Health check**: polls `http://localhost:9180/` (WebFig root, returns HTTP 200 without
   auth).  **Never** poll `/rest/` for health — it returns HTTP 401 which causes
   `curl --fail` to exit non-zero, making RouterOS look down even when it's running
+- **`check-installation` on aarch64**: always returns HTTP 400 `"damaged system package:
+  bad image"` in QEMU (confirmed even on UTM/macOS). Root cause: RouterOS CHR ARM64
+  init does a **kexec self-reload** with its own internal device tree blob (DTB). QEMU's
+  `virt` machine provides a generic `linux,dummy-virt` DTB which RouterOS's kexec rejects
+  ("Invalid 2nd device tree"). The kexec failure is logged in the serial console and
+  causes check-installation to report the image as damaged. RouterOS continues booting
+  normally (HTTP 200 works) — only the kexec-dependent check fails. This is a RouterOS
+  limitation; the CI correctly reports it as a failure so we know when/if it is fixed.
+  See `Lab/qemu-arm64/NOTES.md` for full analysis.
 - **API calls**: use `http://admin:@localhost:9180/rest/…` (empty password = RouterOS default)
 - **ROSE machines**: libvirt.xml contains multiple `<disk>` entries.  The workflow
   extracts ALL disks via `xmllint` loop and passes each as a separate QEMU `-drive` flag

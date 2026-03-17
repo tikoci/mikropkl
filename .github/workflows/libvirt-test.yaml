@@ -182,12 +182,15 @@ jobs:
             fi
           fi
 
-          # aarch64 virt machine type needs UEFI firmware; search known locations
+          # aarch64 virt machine type needs UEFI firmware; search known locations.
+          # Prefer AAVMF_CODE.fd (64 MiB, properly paired with AAVMF_VARS.fd) over
+          # the compact QEMU_EFI.fd (only 2 MiB on ubuntu-24.04-arm native runners).
+          # Both files must be the same size for pflash to work.
           if [ "$ARCH" = "aarch64" ]; then
             UEFI_CODE=""
             for p in \
-              /usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
               /usr/share/AAVMF/AAVMF_CODE.fd \
+              /usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
               /usr/share/edk2/aarch64/QEMU_EFI.fd; do
               if [ -f "$p" ]; then UEFI_CODE="$p"; break; fi
             done
@@ -198,23 +201,38 @@ jobs:
             # Use pflash mode (not -bios) so UEFI has a writable NVRAM (pflash1).
             # -bios only provides the code ROM with no writable variable store, which
             # can prevent EDK2 from completing initialisation on newer QEMU versions.
+            # Try to find a vars file from the same "family" as the code ROM for an
+            # exact size match. Fall back to any vars file then truncate to match.
             UEFI_VARS_SRC=""
-            for v in \
-              /usr/share/qemu-efi-aarch64/QEMU_VARS.fd \
-              /usr/share/AAVMF/AAVMF_VARS.fd \
-              /usr/share/edk2/aarch64/QEMU_VARS.fd; do
-              if [ -f "$v" ]; then UEFI_VARS_SRC="$v"; break; fi
-            done
+            case "$UEFI_CODE" in
+              */AAVMF_CODE.fd)
+                # Prefer the matched AAVMF_VARS.fd from same directory
+                AAVMF_DIR=$(dirname "$UEFI_CODE")
+                [ -f "$AAVMF_DIR/AAVMF_VARS.fd" ] && UEFI_VARS_SRC="$AAVMF_DIR/AAVMF_VARS.fd" ;;
+              */QEMU_EFI.fd)
+                EFI_DIR=$(dirname "$UEFI_CODE")
+                [ -f "$EFI_DIR/QEMU_VARS.fd" ] && UEFI_VARS_SRC="$EFI_DIR/QEMU_VARS.fd" ;;
+            esac
+            # Generic fallback search if matched vars not found
+            if [ -z "$UEFI_VARS_SRC" ]; then
+              for v in \
+                /usr/share/AAVMF/AAVMF_VARS.fd \
+                /usr/share/qemu-efi-aarch64/QEMU_VARS.fd \
+                /usr/share/edk2/aarch64/QEMU_VARS.fd; do
+                if [ -f "$v" ]; then UEFI_VARS_SRC="$v"; break; fi
+              done
+            fi
             CODE_SIZE=$(stat -c%s "$UEFI_CODE")
             if [ -n "$UEFI_VARS_SRC" ]; then
               cp "$UEFI_VARS_SRC" /tmp/qemu-efi-vars.fd
-              echo "UEFI vars: $UEFI_VARS_SRC -> /tmp/qemu-efi-vars.fd"
+              echo "UEFI vars: $UEFI_VARS_SRC ($(stat -c%s "$UEFI_VARS_SRC") bytes) -> /tmp/qemu-efi-vars.fd"
             else
               echo "::warning::No UEFI VARS file found; creating empty placeholder"
+              touch /tmp/qemu-efi-vars.fd
             fi
-            # Both pflash units must be identical size. Truncate/pad vars to match
-            # the code ROM (QEMU_EFI.fd is 64 MiB on Ubuntu; QEMU_VARS.fd may be 2 MiB).
+            # Both pflash units must be identical size. Truncate/pad vars to match code ROM.
             truncate -s "$CODE_SIZE" /tmp/qemu-efi-vars.fd
+            echo "UEFI code: $UEFI_CODE ($CODE_SIZE bytes)"
             echo "UEFI vars file size set to $CODE_SIZE bytes (matches code ROM)"
             # pflash unit=0 → code (read-only), unit=1 → vars (writable)
             echo "QEMU_UEFI_FLAGS=-drive if=pflash,format=raw,readonly=on,unit=0,file=$UEFI_CODE -drive if=pflash,format=raw,unit=1,file=/tmp/qemu-efi-vars.fd" >> $GITHUB_ENV
@@ -390,7 +408,8 @@ jobs:
         # check-installation is a POST; "duration" tells RouterOS how long to run
         # the disk/filesystem check.  It returns intermediate progress plus a final
         # result as a JSON array — we check the last element for "installation is ok".
-        # This command may not exist on all RouterOS builds — treat 400 as non-fatal.
+        # HTTP 400 with "damaged system package" means RouterOS booted but the image
+        # is corrupt — this is a hard failure that must be fixed, not ignored.
         run: |
           echo "Calling $API_BASE/system/check-installation (POST with duration=30s) ..."
           HTTP_CODE=$(curl -sS -o /tmp/check-result.json -w "%{http_code}" -X POST \
@@ -399,13 +418,8 @@ jobs:
             "$API_BASE/system/check-installation")
           RESULT=$(cat /tmp/check-result.json)
           echo "HTTP $HTTP_CODE — Response: $RESULT"
-          if [ "$HTTP_CODE" = "400" ]; then
-            echo "::warning::check-installation command not available on this RouterOS build (HTTP 400)"
-            echo "status=not available" >> $GITHUB_OUTPUT
-            exit 0
-          fi
           if [ "$HTTP_CODE" -ge 400 ]; then
-            echo "::error::check-installation request failed with HTTP $HTTP_CODE"
+            echo "::error::check-installation failed (HTTP $HTTP_CODE): $RESULT"
             exit 1
           fi
           STATUS=$(echo "$RESULT" | python3 -c "
