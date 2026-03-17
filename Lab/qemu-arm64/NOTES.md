@@ -11,14 +11,23 @@ RouterOS CHR ARM64 boots in QEMU (HTTP 200 from WebFig) but always fails
 
 This failure is **reproducible on UTM (macOS) and QEMU (Linux CI)** and is NOT caused
 by CI configuration. It is an inherent RouterOS CHR ARM64 limitation in QEMU virtual
-environments caused by a fundamental mismatch: RouterOS **check-installation** requires
-hardware capability files in `/ram/` (populated at boot from DTB hardware info), but
-QEMU's generic `virt` machine generates only a stub `"linux,dummy-virt"` DTB that
-RouterOS cannot use to populate those files.
+environments.
+
+**Root cause (confirmed via x86/ARM binary comparison):** The ARM32 checker binary
+(`bin/bash` from the system NPK) has stricter verification logic than the x86 checker.
+When `/ram/` exists but contains no capability files (magic `0xbad0f11e`), the ARM
+checker returns a non-zero exit code, which RouterOS reports as "damaged system package:
+bad image." The x86 checker always succeeds — it has `/bin/milo` as a fallback that
+runs unconditionally. The ARM checker lacks this fallback.
+
+On QEMU with `acpi=on`, the EFI stub generates an empty DTB → RouterOS init creates
+`/ram/` (tmpfs) but has no hardware info to populate capability files → ARM checker
+finds empty `/ram/` → failure.
 
 **Bottom line — this cannot be fixed with QEMU flag tuning alone. Requires either:**
-1. A QEMU machine that RouterOS's `Marvell Armada7040` drivers can drive (not `virt`)
-2. Or MikroTik shipping a QEMU-compatible capability-file generator for CHR ARM64
+1. MikroTik aligning the ARM checker binary's behavior with x86 (always succeed for CHR)
+2. A QEMU machine that RouterOS's `Marvell Armada7040` drivers can drive (does not exist)
+3. Or MikroTik shipping a QEMU-compatible capability-file generator for CHR ARM64
 
 **CPU model does NOT matter** — tested: cortex-a53, cortex-a72, neoverse-n1 all fail identically.
 
@@ -74,15 +83,28 @@ UEFI (EDK2/QEMU_EFI.fd or AAVMF_CODE.fd)
 
 ## Root Cause: Deep Analysis
 
-### Phase 1 — Serial Console (kexec failure at boot)
+### Phase 1 — Serial Console (full boot trace)
 
-Serial console output during boot:
+Complete serial console output during boot (captured with `-serial file:`):
 ```
+UEFI firmware (version edk2-stable202408-prebuilt.qemu.org ...)
+ArmTrngLib could not be correctly initialized.
+Error: Image at 0007FDB6000 start failed: 00000001
+Error: Image at 0007FD6D000 start failed: Not Found
+...
+Image type X64 can't be loaded on AARCH64 UEFI system.
+BdsDxe: loading Boot0001 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x1,0x0)
+BdsDxe: starting Boot0001 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x1,0x0)
+EFI stub: Booting Linux Kernel...
+EFI stub: Generating empty DTB          ← KEY: no hardware DTB available
+EFI stub: Exiting boot services and installing virtual address map...
 Starting...
-kexec: Invalid 2nd device tree.
+kexec: Error: No device tree available.  ← kexec needs DTB, finds none
 kexec: load failed.
 Cannot load /flash/boot/EFI/BOOT/BOOTAA64.EFI
-Starting services...
+Starting services...                     ← Falls back to direct service start
+MikroTik 7.22 (stable)
+MikroTik Login:
 ```
 
 QEMU `virt` machine generates:
@@ -100,13 +122,19 @@ NPK) for `marvell,armada7040` — this does NOT match the QEMU virt machine, so 
 verification section. This is NOT real bash — it is a RouterOS-specific **hardware checker
 binary** (ARM32 ELF, 29,619 bytes, runs in ARM64's AArch32 compatibility mode).
 
-#### What `bin/bash` (checker) does — disassembly summary
+**Note:** The error string "damaged system package: bad image" comes from **RouterOS
+itself**, not from the checker binary. Neither the ARM nor x86 checker contains this
+text. RouterOS interprets the checker's non-zero exit code as the error.
+
+#### What `bin/bash` (ARM checker) does — disassembly summary
 
 `main()` at `0x1040c` calls `check_function(ptr_to_"/ram")`:
 
 ```
-check_function(0x153cc):         ; arg = { "/ram\0", "/var/pckg/\0", "installed first stage\0" }
+check_function(0x153cc):         ; arg includes "/ram", "/var/pckg/", "installed first stage"
   open("/ram", O_RDONLY|O_DIRECTORY)     ; 0x84000 flags
+  if open fails:
+    → print "installed first stage" → return 0 (SUCCESS)
   loop: getdents64(fd, buf, 2048)        ; ARM32 syscall #217
     for each directory entry in /ram/:
       stat(entry)
@@ -114,27 +142,53 @@ check_function(0x153cc):         ; arg = { "/ram\0", "/var/pckg/\0", "installed 
       open("/ram/<entry>")
       read(fd, buf, 4)
       if buf[0..3] == { 0x1e, 0xf1, 0xd0, 0xba }:  ; magic = 0xbad0f11e LE
-        → proceed to kexec boot/kernel ELF (success path)
+        → copy capability file to /var/pckg/ → mark success
       else: skip
   if no magic files found:
-    → return error → "damaged system package: bad image"
+    → return non-zero → RouterOS reports "damaged system package: bad image"
 ```
 
 **Magic bytes `0x1e 0xf1 0xd0 0xba`** (= uint32_t `0xbad0f11e` little-endian) are a
 RouterOS proprietary header used by hardware capability files. These files are created in
 `/ram/` by RouterOS init at boot based on DTB hardware info.
 
-#### Key rodata strings in the checker binary
+**Note on magic comparison:** The magic is compared byte-by-byte at `0x10500`–`0x1052c`,
+NOT stored as a 32-bit constant in .rodata. Each byte is `ldrb` + `cmp` separately:
+`0x1e`, `0xf1` (as -0xf = 0xf1), `0xd0` (as -0x30), `0xba` (as -0x46).
 
-| Virtual address | String |
-|---|---|
-| `0x153bc` | `/ram/syscap/` |
-| `0x153cc` | `/ram` (directory to scan) |
-| `0x153d4` | `/var/pckg/` |
-| `0x153e0` | `installed first stage` |
-| `0x15410` | `/boot` |
-| `0x15418` | `rootfs` |
-| `0x15420` | `/ram/` (path prefix) |
+#### x86 checker binary — critical difference
+
+The x86 checker (`bin/bash` from x86_64 CHR NPK, 16,972 bytes, 32-bit x86 ELF) has
+**fundamentally different logic**:
+
+```
+x86 check_function:
+  open("/ram", O_RDONLY|O_DIRECTORY)
+  if open fails:
+    → fall through to exec /bin/milo → return 0 (SUCCESS)
+  loop: scan /ram/ for magic files
+    if found: copy to /var/pckg/
+  → fall through to exec /bin/milo → return 0 (SUCCESS)  ← ALWAYS succeeds!
+```
+
+**The x86 checker has NO failure path.** After scanning `/ram/` (whether it exists or
+not, whether magic files are found or not), it always execs `/bin/milo` and returns
+success.
+
+**String comparison:**
+
+| String | ARM checker | x86 checker |
+|--------|:-----------:|:-----------:|
+| `/ram/syscap/` | ✅ 0x153bc | ✅ 0x804b000 |
+| `/ram` | ✅ 0x153cc | ✅ 0x804b00d |
+| `/var/pckg/` | ✅ 0x153d4 | ✅ 0x804b012 |
+| `/bin/milo` | ❌ MISSING | ✅ 0x804b01d |
+| `installed first stage` | ✅ 0x153e0 | ✅ 0x804b027 |
+| binary size | 29,619 bytes | 16,972 bytes |
+
+The ARM checker is almost twice the size of x86, with the extra code implementing the
+strict verification path that produces the failure. The x86 checker's `/bin/milo`
+fallback makes it always succeed.
 
 #### What populates `/ram/` on real hardware
 
@@ -152,11 +206,21 @@ Testing with `-machine virt,acpi=off`:
 - **Root cause**: RouterOS's kernel lacks the `pci-host-ecam-generic` driver (confirmed:
   string not present in BOOTAA64.EFI). Without DTB-based generic PCIe, RouterOS cannot
   find the `virtio-blk-pci` disk on the QEMU virt PCIe bus.
-- RouterOS only supports PCIe via ACPI (for x86) or native Marvell PCIe (for ARM64 HW)
+- RouterOS only supports PCIe via ACPI (for x86/QEMU) or native Marvell PCIe (for ARM64 HW)
+
+#### MMIO transport also fails with acpi=off
+
+Tested with `-device virtio-blk-device` and `-device virtio-net-device` (MMIO transport)
+instead of PCI, combined with `acpi=off`:
+- EFI stub reports: _"Using DTB from configuration table"_ ← DTB found
+- Kernel exits boot services successfully
+- But then **stalls completely** — no serial output after "Exiting boot services"
+- RouterOS kernel lacks `virtio-mmio` driver (confirmed: not present in BOOTAA64.EFI)
 
 **This creates an unresolvable dilemma:**
-- `acpi=on` → disk works, DTB empty → no `/ram/` capability files → check fails
-- `acpi=off` → DTB present, but disk not found → RouterOS can't boot from disk
+- `acpi=on` → disk works via ACPI-discovered PCI, but DTB empty → no `/ram/` capability files → check fails
+- `acpi=off` + PCI → DTB present, but no `pci-host-ecam-generic` → disk not found
+- `acpi=off` + MMIO → DTB present, but no `virtio-mmio` driver → kernel stalls
 
 ### Phase 4 — RouterOS kernel capabilities (confirmed)
 
@@ -183,21 +247,39 @@ The check reads `/ram/` files with magic `0xbad0f11e`, not CPU registers.
 
 ### Why x86_64 passes check-installation
 
-x86_64 Linux uses ACPI, not DTB. RouterOS x86_64 init populates its capability
-structures from ACPI tables, which QEMU provides correctly for `q35` or `i440fx`.
-No kexec DTB step required.
+The x86_64 checker binary (`bin/bash` from x86 system NPK) has **fundamentally different
+logic**: it always succeeds regardless of `/ram/` state. After scanning `/ram/` for
+capability files (same magic `0xbad0f11e`), the x86 checker unconditionally falls through
+to executing `/bin/milo` and returns success.
+
+The ARM32 checker binary lacks the `/bin/milo` fallback. When `/ram/` exists but contains
+no capability files, it returns non-zero, causing RouterOS to report "bad image."
+
+This is a MikroTik design decision (possibly related to ARM hardware licensing verification)
+and unrelated to ACPI vs DTB. Both architectures scan `/ram/` the same way; only the
+failure handling differs.
+
+### Additional approaches tested (all negative)
+
+| Approach | Result | Why it failed |
+|---|---|---|
+| SMBIOS injection (`-smbios type=1,manufacturer=MikroTik`) | board-name changed but check still fails | Checker reads `/ram/` files, not SMBIOS |
+| Custom DTB with Marvell compatible strings (`-dtb`) | Kernel ignores DTB when ACPI present | "EFI stub: Generating empty DTB" still emitted |
+| qcow2 format instead of raw | No difference | Disk format irrelevant to capability files |
+| Different CPU models (cortex-a53/72, neoverse-n1) | All fail identically | Checker doesn't read CPU registers |
 
 ### Is this fixable?
 
 **No, not with standard QEMU `virt` machine and RouterOS CHR ARM64 as shipped.**
 
-What would be needed:
-1. QEMU would need to emulate a `marvell,armada-7040-db` machine type (does not exist)
-2. OR RouterOS would need a `pci-host-ecam-generic` driver (not compiled in)
-3. OR MikroTik would need to add QEMU-CHR-specific init path that creates capability
-   files in `/ram/` without requiring hardware DTB parsing
+The most realistic fix paths:
+1. **MikroTik aligns ARM checker with x86** — make the ARM `bin/bash` checker always
+   succeed for CHR, like the x86 version does (add `/bin/milo` fallback or similar)
+2. **MikroTik adds `pci-host-ecam-generic` driver** — would allow `acpi=off` + real DTB
+3. **QEMU adds Marvell Armada7040 machine type** — extremely unlikely/impractical
 
-**CI should mark this as an expected failure with explanation**, not a blocking error.
+**CI should treat ARM64 check-installation as an expected failure**, testing only HTTP 200
+as the health check for ARM64 machines.
 
 ---
 
@@ -281,6 +363,8 @@ These are NOT committed (disk images/blobs are gitignored), re-extract as needed
 | `/tmp/ros-squash-root/` | RouterOS squashfs extracted | `unsquashfs -d /tmp/ros-squash-root /tmp/ros-system.image` |
 | `/tmp/ros-root.ext4` | Ext4 second partition (92 MiB) | `dd if=chr-7.22-arm64.img bs=512 skip=68608 of=/tmp/ros-root.ext4` |
 | `/tmp/ros-efi/EFI/BOOT/BOOTAA64.EFI` | RouterOS kernel (11.8 MiB) | Mount EFI partition (offset 2048 * 512) |
+| `/tmp/x86-chr/chr-7.22.img` | x86_64 CHR image (128 MiB) | `wget https://download.mikrotik.com/routeros/7.22/chr-7.22.img.zip` |
+| `/tmp/x86-chr/x86-checker.elf` | x86 checker binary (16,972 bytes) | Extracted from x86 system NPK at offset 0x057d303a in ext4 |
 
 ### Analysis scripts in `/tmp/` (recreate from disassembly notes above)
 

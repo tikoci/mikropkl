@@ -6,9 +6,14 @@ This file documents the mikropkl project for AI coding agents.  Read it before m
 
 `mikropkl` produces **UTM virtual machine bundles** (`.utm` directories) from [`pkl`](https://pkl-lang.org) manifests, with MikroTik RouterOS CHR as the primary guest OS.
 
-Secondary goal: generate `libvirt.xml` alongside each QEMU machine so the same disk images can be tested under QEMU/libvirt on Linux CI (GitHub Actions).
+Additional goals:
+- Generate `libvirt.xml` alongside each QEMU machine so the same disk images can be
+  tested under QEMU/libvirt on Linux CI (GitHub Actions).
+- The `.utm` bundle is a ZIP archive — in principle usable as a deployment format on
+  Linux too (see "Future Work" at the end of this document).
 
-UTM is a macOS virtualization application.  **This project is macOS-first for users; Linux CI is for automated testing only.**
+UTM is a macOS virtualization application.  **This project is macOS-first for users;
+Linux CI is for automated testing only (currently).**
 
 ## Directory Structure
 
@@ -23,15 +28,17 @@ Pkl/                  ← core pkl modules
   UTM.pkl             ← UTM-specific types (SystemArchitecture, BackendType, etc.)
   Randomish.pkl       ← deterministic pseudo-random helpers (MAC address generation)
   URL.pkl, SVG.pkl    ← helper modules
+  chr-version.pkl     ← resolves RouterOS version from release channel (env: CHR_VERSION)
 Files/
   efi_vars.fd         ← UEFI variable store (copied into Apple-backend bundles)
   LIBVIRT.md          ← libvirt-specific documentation (see below)
 Machines/             ← build output (git-ignored except .url/.size placeholders)
 Lab/                  ← local experiments, debug scripts, investigation notes (NOT build artifacts)
   qemu-arm64/         ← QEMU aarch64 boot investigation (see NOTES.md inside)
+  x86-direct-kernel/  ← x86 direct kernel boot experiments (see NOTES.md inside)
 .github/workflows/
   chr.yaml            ← builds and releases UTM packages to GitHub Releases
-  libvirt-test.yaml   ← boots each QEMU machine in CI and checks /rest/system/check-installation
+  libvirt-test.yaml   ← boots each QEMU machine in CI and checks installation
   auto.yaml           ← automated trigger for chr.yaml on new RouterOS versions
 ```
 
@@ -46,6 +53,137 @@ Lab/                  ← local experiments, debug scripts, investigation notes 
 - Scripts and notes ARE tracked — commit them so future agents can resume investigation
 
 When a fix is found in `Lab/`, graduate it to the appropriate production file (workflow, Pkl module, Makefile, etc.) and document the root cause in CLAUDE.md and/or the relevant `Lab/*/NOTES.md`.
+
+## RouterOS CHR Image Reference
+
+### Image variants
+
+| Image | Source | Architecture | EFI partition | Boot method |
+|---|---|---|---|---|
+| `chr-<ver>.img` | download.mikrotik.com | x86_64 | **Proprietary** (not FAT) | SeaBIOS chain-loads custom boot sector |
+| `chr-<ver>-arm64.img` | download.mikrotik.com | aarch64 | Standard FAT16 with `EFI/BOOT/BOOTAA64.EFI` | UEFI loads EFI stub kernel |
+| `chr-efi.img` | `tikoci/fat-chr` GitHub | x86_64 | Standard FAT16 with `EFI/BOOT/BOOTX64.EFI` | UEFI loads EFI stub kernel |
+
+**Key insight:** The standard x86 CHR image has a *proprietary* boot partition that looks
+like an EFI System Partition in GPT but is **not FAT** — the OEM name, bytes/sector, and
+sectors/cluster are all zero.  The kernel is stored at raw offset `0x80000` within this
+partition.  OVMF/UEFI cannot read it.  SeaBIOS chain-loads via MBR → custom boot sector.
+
+The `tikoci/fat-chr` tool reformats this partition into standard FAT16, placing the kernel
+as `EFI/BOOT/BOOTX64.EFI` plus a `map` file (sector-number mapping table).  This is
+required for Apple Virtualization.framework (which demands a proper UEFI boot path).
+
+### Disk layout (both architectures, 128 MiB)
+
+Hybrid GPT+MBR:
+- **Partition 1**: "RouterOS Boot" — 32–33 MiB, typed as EFI System Partition in GPT
+- **Partition 2**: "RouterOS" — ~94 MiB, ext4 root filesystem
+
+### Kernel details
+
+Both architectures: the kernel is a Linux EFI stub (PE/COFF + bzImage/Image dual format).
+
+| | x86_64 | aarch64 |
+|---|---|---|
+| Kernel file | `BOOTX64.EFI` / bzImage | `BOOTAA64.EFI` / Image |
+| Kernel version | 5.6.3-64 | 5.6.3 |
+| Size | ~4.0 MiB | ~11.8 MiB |
+| EFI stub | Yes (PE + bzImage) | Yes (PE + ARM64 Image) |
+| Has initramfs | No | No |
+| Direct `-kernel` boot | **Not viable** (hangs in real-mode setup) | **Not viable** (needs EFI boot services) |
+| `VZLinuxBootLoader` | Not suitable (no initramfs, needs firmware) | Not suitable (same) |
+
+See `Lab/x86-direct-kernel/NOTES.md` for full analysis of why `-kernel` doesn't work.
+
+## Backend / Architecture Matrix
+
+The project produces five machine variants across two backends and two architectures:
+
+| Machine | Backend | Arch | Firmware | Disk interface (plist) | Actual QEMU device | Image source |
+|---|---|---|---|---|---|---|
+| `chr.x86_64.qemu` | QEMU | x86_64 | SeaBIOS | VirtIO | `if=virtio` (virtio-blk-pci on q35) | MikroTik |
+| `chr.aarch64.qemu` | QEMU | aarch64 | UEFI (EDK2) | NVMe (plist) | **virtio-blk-pci** (NOT NVMe) | MikroTik |
+| `chr.x86_64.apple` | Apple VZ | x86_64 | Built-in UEFI | NVMe | NVMe (actual) | tikoci/fat-chr |
+| `rose.chr.x86_64.qemu` | QEMU | x86_64 | SeaBIOS | VirtIO | same + qcow2 additional disks | MikroTik |
+| `rose.chr.aarch64.qemu` | QEMU | aarch64 | UEFI (EDK2) | NVMe (plist) | **virtio-blk-pci** | MikroTik |
+
+"ROSE" variants add 4 × 10 GB qcow2 disks for multi-disk RouterOS testing.
+
+### Important: VirtIO on aarch64
+
+UTM's `config.plist` declares `Interface=NVMe` for aarch64 QEMU machines, but UTM
+actually passes `-device virtio-blk-pci` to QEMU (NOT actual NVMe).  When running
+QEMU outside UTM:
+
+- **x86_64 (q35):** `if=virtio` shorthand works — resolves to `virtio-blk-pci`
+- **aarch64 (virt):** `if=virtio` shorthand resolves to `virtio-blk-device` (MMIO),
+  which **does NOT work** — RouterOS kernel lacks the `virtio-mmio` driver.
+  Must use explicit:
+  ```
+  -drive file=disk.img,format=raw,if=none,id=drive1
+  -device virtio-blk-pci,drive=drive1
+  ```
+
+### RouterOS kernel driver support (confirmed via binary analysis)
+
+| Driver | x86_64 | aarch64 | Notes |
+|---|---|---|---|
+| `virtio_pci` | ✅ | ✅ | ACPI-based discovery (QEMU default) |
+| `virtio_mmio` | ❌ unknown | ❌ | Would need `if=virtio` on `virt` — not viable |
+| `pci-host-ecam-generic` | N/A | ❌ | DTB-based generic PCIe — ARM only, not present |
+| `marvell,armada7040` | ❌ | ✅ | ARM target hardware — no QEMU machine type |
+
+### Network interface
+
+All QEMU machines use `virtio-net-pci`.  The pkl module sets `Hardware = "virtio-net-pci"`
+in the UTM Network config.  On Apple backend, UTM uses its own VirtIO implementation.
+
+## QEMU Settings Reference
+
+### x86_64 QEMU
+
+```
+qemu-system-x86_64 -M q35 -m 1024 -smp 2 \
+  -drive file=chr-7.22.img,format=raw,if=virtio \
+  -netdev user,id=net0,hostfwd=tcp::9180-:80 \
+  -device virtio-net-pci,netdev=net0 \
+  -display none -serial stdio
+```
+
+No UEFI firmware needed — SeaBIOS (QEMU default) chain-loads MikroTik's custom boot
+sector.  UTM sets `UEFIBoot=false`, `Hypervisor=true`, `RNGDevice=true` for x86_64.
+
+### aarch64 QEMU
+
+```
+qemu-system-aarch64 -M virt -cpu cortex-a710 -m 1024 -smp 2 \
+  -drive if=pflash,format=raw,readonly=on,unit=0,file=edk2-aarch64-code.fd \
+  -drive if=pflash,format=raw,unit=1,file=efi-vars-copy.fd \
+  -drive file=chr-7.22-arm64.img,format=raw,if=none,id=drive1 \
+  -device virtio-blk-pci,drive=drive1,bootindex=0 \
+  -netdev user,id=net0,hostfwd=tcp::9180-:80 \
+  -device virtio-net-pci,netdev=net0 \
+  -display none -monitor none \
+  -chardev socket,id=serial0,path=/tmp/serial.sock,server=on,wait=off \
+  -serial chardev:serial0
+```
+
+Critical requirements:
+- **UEFI pflash**: Both units must be identical size (64 MiB).  Use
+  `AAVMF_CODE.fd` + `AAVMF_VARS.fd` on Ubuntu; `edk2-aarch64-code.fd` +
+  `edk2-arm-vars.fd` on Homebrew.  Do NOT use `-bios` (no writable NVRAM).
+  The compact `QEMU_EFI.fd` (2 MiB on `ubuntu-24.04-arm`) is unsuitable.
+- **Explicit virtio-blk-pci**: Do NOT use `if=virtio` (resolves to MMIO on `virt`).
+- **CPU**: `cortex-a710` matches the UTM config.plist setting.
+- **No `-nographic`** when backgrounding: redirects serial to stdio, blocks without
+  a terminal.  Use `-display none -monitor none -chardev socket... -serial chardev:...`.
+- **TCG on macOS**: Add `-accel tcg,tb-size=256` (no KVM on macOS).
+
+### Apple Virtualization.framework (Intel x86_64)
+
+Uses the fat-chr image (`chr-efi.img`) with proper FAT16 EFI partition.  UTM config:
+`UEFIBoot=true`, `OperatingSystem=Linux`, NVMe disk interface, `efi_vars.fd` for
+UEFI NVRAM.  No direct QEMU flags — Apple VZ handles UEFI internally.
 
 ## How the Build Works
 
@@ -98,10 +236,17 @@ See `Files/LIBVIRT.md` for end-user documentation.  Agent-relevant details:
 
 | Field | x86_64 | aarch64 |
 |---|---|---|
-| `<os>` | plain `<os>` | `<os firmware="efi">` (libvirt auto UEFI) |
+| `<os>` | plain `<os>` (SeaBIOS) | `<os firmware="efi">` (libvirt auto UEFI) |
 | machine type | `q35` | `virt` |
 | serial target | `isa-serial` / `isa-serial` | `system-serial` / `pl011` |
 | emulator path | `/usr/bin/qemu-system-x86_64` | `/usr/bin/qemu-system-aarch64` |
+| features | `<acpi/>` + `<apic/>` | (none — `virt` has ACPI by default) |
+| disk bus | `<target bus="virtio"/>` | `<target bus="virtio"/>` |
+
+Both architectures use `<target bus="virtio"/>` in libvirt XML.  Libvirt maps this
+to `virtio-blk-pci` on both `q35` and `virt` machine types — matching UTM/QEMU
+behaviour.  The workflow uses explicit `-device virtio-blk-pci` for aarch64 when
+launching QEMU directly (bypassing libvirt).
 
 ### Disk path sentinel
 
@@ -114,6 +259,13 @@ substitute the real absolute path.
 
 `migratable="on"` with `host-passthrough` is rejected by QEMU builds that don't support
 live migration (including Homebrew QEMU on macOS).  It was removed; `check="none"` is enough.
+
+### Network: user-mode (SLIRP)
+
+`libvirt.xml` uses `<interface type="user">` for networking, which does not support
+`hostfwd` port-forwarding via the libvirt XML alone.  Port forwarding requires either
+`<qemu:commandline>` extensions in the XML, or launching QEMU directly with
+`-netdev user,id=net0,hostfwd=tcp::9180-:80`.  The CI workflow uses the latter approach.
 
 ## libvirt-test.yaml — How the CI Works
 
@@ -151,29 +303,55 @@ live migration (including Homebrew QEMU on macOS).  It was removed; `check="none
   instead.
 - **Health check**: polls `http://localhost:9180/` (WebFig root, returns HTTP 200 without
   auth).  **Never** poll `/rest/` for health — it returns HTTP 401 which causes
-  `curl --fail` to exit non-zero, making RouterOS look down even when it's running
+  `curl --fail` to exit non-zero, making RouterOS look down even when it's running.
 - **`check-installation` on aarch64**: always returns HTTP 400 `"damaged system package:
-  bad image"` in QEMU (confirmed even on UTM/macOS). Root cause (fully reverse-engineered):
-  RouterOS `check-installation` REST POST runs an ARM32 ELF binary (`bin/bash` from the
-  NPK verification section — NOT real bash). This binary scans `/ram/` for regular files
-  with magic header `0x1e 0xf1 0xd0 0xba` (`0xbad0f11e` LE). These capability files are
-  created by RouterOS init by parsing hardware DTB info at boot. On QEMU `virt` with
-  `acpi=on` (default), EDK2 generates an **empty DTB** ("EFI stub: Generating empty DTB")
-  → RouterOS init has no hardware info → no `/ram/` capability files → checker fails.
-  With `acpi=off`, DTB is present but RouterOS kernel lacks `pci-host-ecam-generic` driver
-  → disk not found. Either way, check-installation cannot pass. CPU model is irrelevant
-  (cortex-a53, cortex-a72, neoverse-n1 all fail identically). RouterOS continues booting
-  normally (HTTP 200 works) — only the capability-file check fails. See
-  `Lab/qemu-arm64/NOTES.md` for full analysis and binary reverse engineering details.
+  bad image"` in QEMU (confirmed even on UTM/macOS). The CI workflow skips this check on
+  aarch64.  See "Known Limitations" section below for full root cause analysis.
 - **API calls**: use `http://admin:@localhost:9180/rest/…` (empty password = RouterOS default)
 - **ROSE machines**: libvirt.xml contains multiple `<disk>` entries.  The workflow
-  extracts ALL disks via `xmllint` loop and passes each as a separate QEMU `-drive` flag
+  extracts ALL disks via `xmllint` loop and passes each as a separate QEMU `-drive` flag.
 - **Timeouts**: KVM (any arch) = 2 min; x86_64 without KVM = 3 min; aarch64 without KVM = 4 min
 
 ### Port forwarding
 `libvirt.xml` uses `<interface type="user">` (SLIRP), which does not support port
 forwarding in the XML without `<qemu:commandline>` extensions.  The workflow launches QEMU
 directly (not via `virsh start`) and adds `-netdev user,id=net0,hostfwd=tcp::9180-:80`.
+
+## Known Limitations
+
+### check-installation fails on aarch64 (all environments)
+
+RouterOS `check-installation` REST POST runs a 32-bit ELF binary (`bin/bash` from the
+NPK verification section — NOT real bash).  The ARM checker (29,619 bytes) and x86 checker
+(16,972 bytes) have **fundamentally different logic**: the x86 checker always succeeds via
+a `/bin/milo` exec fallback, while the ARM checker lacks this fallback and returns non-zero
+when `/ram/` exists but contains no capability files (magic `0xbad0f11e`).
+
+Capability files are created by RouterOS init from hardware DTB info.  On QEMU `virt`
+with `acpi=on` (default), EDK2 generates an **empty DTB** ("EFI stub: Generating empty
+DTB") → no hardware info → no `/ram/` capability files → ARM checker fails.
+
+The ACPI/DTB trilemma is unresolvable:
+- `acpi=on` → disk works (ACPI PCIe), but DTB empty → no capability files → check fails
+- `acpi=off` + PCI → DTB present, but no `pci-host-ecam-generic` driver → disk not found
+- `acpi=off` + MMIO → DTB present, but no `virtio-mmio` driver → kernel stalls
+
+CPU model is irrelevant — tested cortex-a53/a72/neoverse-n1 all fail identically.
+RouterOS continues booting normally (HTTP 200 works) — only the capability-file check fails.
+The CI workflow skips this check on aarch64.
+
+See `Lab/qemu-arm64/NOTES.md` for full binary reverse engineering details.
+
+### Direct kernel boot not viable (either architecture)
+
+QEMU's `-kernel` flag (Linux boot protocol) does not work for RouterOS CHR:
+- **x86_64**: 16-bit real-mode setup code depends on BIOS INT services not present in
+  QEMU's Linux boot protocol.  Prints "early console in setup code" then hangs.
+- **aarch64**: EFI stub requires EFI boot services (memory map, runtime services).
+- **EFI handover**: Entry point offset 0x190 lands in compressed data → `#UD` crash.
+- **`VZLinuxBootLoader`**: Not suitable — no initramfs, kernel needs firmware.
+
+See `Lab/x86-direct-kernel/NOTES.md` for full analysis.
 
 ## Common Pitfalls
 
@@ -227,3 +405,93 @@ make libvirt-validate   # requires: brew install libvirt (macOS) or apt libvirt-
 | `chr.yaml` | manual dispatch | Builds and publishes UTM packages to GitHub Releases |
 | `auto.yaml` | scheduled | Triggers `chr.yaml` when a new RouterOS version is detected |
 | `libvirt-test.yaml` | manual dispatch | Boots all QEMU machines in CI and checks installation |
+
+## Development Toolchain (macOS Intel)
+
+### Required
+
+| Tool | Install | Purpose |
+|---|---|---|
+| `pkl` | `brew install pkl` or download binary | pkl manifests → UTM bundles |
+| `qemu-img` | `brew install qemu` | Create qcow2 spare disks (ROSE variants) |
+| `make` | Xcode CLT | Build orchestration |
+| `wget` | `brew install wget` | Download CHR disk images |
+| `unzip` | Built-in | Extract .img.zip downloads |
+
+### For QEMU local testing
+
+| Tool | Install | Purpose |
+|---|---|---|
+| `qemu-system-x86_64` | `brew install qemu` | Run x86_64 CHR locally (TCG, no KVM on macOS) |
+| `qemu-system-aarch64` | `brew install qemu` | Run aarch64 CHR locally |
+| UEFI firmware | Bundled with `brew install qemu` | `edk2-aarch64-code.fd` + `edk2-arm-vars.fd` in `/usr/local/share/qemu/` (Intel) or `/opt/homebrew/share/qemu/` (Apple Silicon) |
+
+### For disk image analysis / debugging
+
+| Tool | Install | Purpose |
+|---|---|---|
+| `mtools` | `brew install mtools` | Read FAT filesystems without mounting (`mdir`, `mcopy` on .img partitions) |
+| `fdisk` | Built-in | GPT/MBR partition table inspection (`fdisk -l` on Linux, `fdisk /dev/diskN` on macOS) |
+| Python 3 | Built-in or `brew install python` | Analysis scripts (`struct` for binary parsing, PE/ELF inspection) |
+| `file` | Built-in | Identify file types (kernel, ELF, PE) |
+| `xxd` / `hexdump` | Built-in | Raw hex inspection of disk images and boot sectors |
+| `hdiutil` | Built-in (macOS) | Attach/mount disk images (e.g., `hdiutil attach -nomount chr.img`) |
+
+### For libvirt XML validation
+
+| Tool | Install | Purpose |
+|---|---|---|
+| `virt-xml-validate` | `brew install libvirt` (macOS) or `apt install libvirt-clients` (Linux) | Validate `libvirt.xml` against RelaxNG schema |
+| `xmllint` | `brew install libxml2` (macOS) or `apt install libxml2-utils` (Linux) | XPath extraction from libvirt.xml (used by CI workflow and Makefile) |
+
+### macOS-specific notes
+
+- **No KVM on macOS**: QEMU uses TCG (software emulation).  Add `-accel tcg,tb-size=256`.
+  x86_64 CHR boots in ~30-60s; aarch64 in ~60-120s under TCG.
+- **Homebrew QEMU paths**: Firmware files are at `/usr/local/share/qemu/` (Intel)
+  or `/opt/homebrew/share/qemu/` (Apple Silicon).  Linux uses `/usr/share/qemu/`
+  or `/usr/share/AAVMF/`.
+- **UTM testing**: `make utm-install` opens all built `.utm` bundles in UTM.app;
+  `make utm-start/stop` controls VMs via AppleScript.
+- **mtools for FAT inspection**: `mdir -i /tmp/efi.fat ::` lists files on the FAT
+  partition without mounting.  Extract the EFI partition first with `dd`.
+
+## Future Work
+
+### macOS CI runners for UTM validation
+
+GitHub Actions now offers `macos-13` (Intel) and `macos-14`/`macos-15` (Apple Silicon)
+runners with UTM/Virtualization.framework support.  A new workflow could:
+- Build the `.utm` bundles
+- Install UTM via Homebrew Cask (`brew install --cask utm`)
+- Use `utmctl` (UTM's CLI) or AppleScript to start VMs and verify HTTP health
+- Test the Apple VZ backend (x86_64 on Intel runners, aarch64 on ARM runners)
+- Validate that `utm://downloadVM?url=` install links work
+
+This would complement the existing `libvirt-test.yaml` by covering the Apple backend.
+
+### QEMU `--readconfig` / ini config file support
+
+QEMU supports loading configuration from `.cfg` ini-style files via `--readconfig`.
+The project could generate a `qemu.cfg` alongside `libvirt.xml` for each QEMU machine,
+providing a self-contained QEMU launch config that doesn't require extracting flags
+from XML.  This would be more portable than libvirt.xml for bare-metal QEMU deployments.
+
+### UTM bundle as Linux deployment format
+
+Since `.utm` is a ZIP archive containing disk images + metadata, it could serve as a
+deployment format beyond macOS:
+- A `chr_install.sh` script could unpack `.utm` ZIP, locate disk images, and
+  generate appropriate QEMU launch scripts or systemd units
+- Local storage convention: `~/.mikropkl/<machine-name>/` for unpacked images
+- Support multiple RouterOS versions side-by-side for testing networking topologies
+- The script could download images automatically from GitHub Releases using the
+  same URLs in `*.img.zip.url` placeholder files
+
+### Multi-version RouterOS testing
+
+The current build produces one version at a time.  For network topology testing
+(multiple RouterOS instances with different versions), the project could:
+- Support building multiple versions in parallel (`make CHR_VERSION=7.22 CHR_VERSION_2=7.18`)
+- Generate bridge/tap networking configs for inter-VM communication
+- Produce docker-compose-like orchestration for multi-router labs
