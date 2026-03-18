@@ -224,9 +224,11 @@ jobs:
               EXPECTED_ACCEL="tcg"
             fi
 
-            # ── Boot timeout (poll every 5s): KVM=30s, TCG=60s ──
+            # ── Boot timeout (poll every 5s): KVM=30s, native TCG=60s, cross-arch TCG=120s ──
             if [ "$EXPECTED_ACCEL" = "kvm" ]; then
               TIMEOUT_ATTEMPTS=6     # 30s
+            elif [ "$VM_ARCH" != "$RUNNER_ARCH" ]; then
+              TIMEOUT_ATTEMPTS=24    # 120s (cross-arch TCG is significantly slower)
             else
               TIMEOUT_ATTEMPTS=12    # 60s
             fi
