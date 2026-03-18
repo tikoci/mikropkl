@@ -157,10 +157,13 @@ function launchScript(
   fi
 
   # ── Fix data paths in qemu.cfg ──
-  # Create a temp copy with resolved paths (leave original untouched)
-  CFG_RESOLVED="$(mktemp)"
+  # Create a resolved copy with actual paths (deterministic path based on VM name).
+  # Foreground: cleaned up on exit.  Background: persists alongside PID/log files.
+  CFG_RESOLVED="/tmp/qemu-\(vmName).cfg"
   sed "s|/QEMU_DATA_PATH|$DATA_DIR|g" "$CFG_FILE" > "$CFG_RESOLVED"
-  trap 'rm -f "$CFG_RESOLVED" \(if (isArm) "\"$VARS_COPY\" 2>/dev/null" else "")' EXIT
+  if [ "$BACKGROUND" = "0" ]; then
+    trap 'rm -f "$CFG_RESOLVED" \(if (isArm) "\"$VARS_COPY\" 2>/dev/null" else "")' EXIT
+  fi
 
   # ── Accelerator detection ──
   ACCEL="${QEMU_ACCEL:-}"
@@ -225,7 +228,7 @@ function launchScript(
     done
   fi
   # Create writable copy of vars, sized to match code ROM
-  VARS_COPY="$(mktemp)"
+  VARS_COPY="/tmp/qemu-\(vmName)-vars.fd"
   if [ -n "$EFI_VARS_SRC" ]; then
     cp "$EFI_VARS_SRC" "$VARS_COPY"
   fi
