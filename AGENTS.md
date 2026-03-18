@@ -106,10 +106,10 @@ Implemented in `Pkl/QemuCfg.pkl`.  Generates `qemu.cfg` (QEMU --readconfig ini) 
 - `qemu.sh` handles: UEFI pflash (aarch64), KVM/HVF/TCG detection, networking
   with port forwarding, display/serial config, `--background`/`--dry-run` modes
 - Makefile targets: `qemu-list`, `qemu-chmod`, `qemu-run`, `qemu-stop`
-- `qemu-test.yaml` CI workflow: x86_64 runner tests only x86_64 machines (end-user scenario,
-  no ARM packages installed); aarch64 runner tests all machines (native + cross-arch x86_64
-  via TCG with 120s timeout).  Both runners verify qemu.cfg ↔ config.pkl consistency.
-  Boot diagnostics log process state and CPU usage during the wait loop.
+- `qemu-test.yaml` CI workflow: both x86_64 and aarch64 runners test ALL machines
+  (native via KVM/TCG, cross-arch via TCG with 120s timeout).  Both runners verify
+  qemu.cfg ↔ config.pkl consistency.  Boot diagnostics log process state and CPU
+  usage during the wait loop.
 
 **Limitations documented in generated files:**
 - QEMU `--readconfig` cannot express: pflash drives, `-accel`, `-netdev user,hostfwd`,
@@ -249,16 +249,6 @@ TCG is normal and confirms active emulation, not a boot loop.
 `<interface type="user">` (SLIRP) doesn't require root privileges or host network
 configuration.  Good enough for CI testing where we just need HTTP access.  The
 trade-off is no port forwarding in libvirt XML — we add it via QEMU command line.
-
-### Why x86_64 CI runner only installs x86 packages
-
-The `qemu-test.yaml` workflow validates `qemu.sh` from an end-user perspective.
-End users on x86_64 would only install `qemu-system-x86` — they wouldn't have
-`qemu-system-arm` or `qemu-efi-aarch64`.  Installing ARM packages on the x86_64
-runner caused 14+ minute apt download stalls on Azure mirrors (the packages are
-~22 MB but Azure mirror speeds are highly variable).  The x86_64 runner now only
-installs x86 packages and only tests x86_64 machines.  Cross-arch testing (x86_64
-on aarch64) is covered by the aarch64 runner, which installs both architectures.
 
 ## Useful Commands for Image Analysis
 

@@ -471,13 +471,8 @@ make qemu-list
 Similar structure to `libvirt-test.yaml`: build job + 2 test jobs (x86_64 + aarch64).
 
 #### Package installation
-- **x86_64 runner**: installs only `qemu-system-x86` (no ARM packages) — mirrors end-user setup
-- **aarch64 runner**: installs `qemu-system-arm`, `qemu-efi-aarch64`, and `qemu-system-x86`
-  (ARM native + x86 for cross-arch testing)
-
-#### Machine filtering
-- **x86_64 runner**: tests only x86_64 machines (skips aarch64 — no ARM firmware/packages)
-- **aarch64 runner**: tests all machines (native aarch64 + cross-arch x86_64 via TCG)
+- Both runners install both architectures: `qemu-system-x86`, `qemu-system-arm`,
+  `qemu-efi-aarch64` — every runner boots ALL machines (native + cross-arch via TCG)
 
 #### Key differences from libvirt-test.yaml
 - Uses `qemu.sh --background --port $PORT` instead of raw QEMU commands

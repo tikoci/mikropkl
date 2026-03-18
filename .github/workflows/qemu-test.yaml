@@ -1,8 +1,7 @@
 name: "Test: QEMU Direct Boot"
 
 # Builds all QEMU manifests and boots them via qemu.sh on x86_64 and aarch64 runners.
-# x86_64 runner tests only x86_64 machines (end-user scenario: no ARM packages installed).
-# aarch64 runner tests all machines (native + cross-arch x86_64 via TCG).
+# Each runner boots ALL machines (native via KVM/TCG, cross-arch via TCG).
 # qemu.cfg ↔ config.pkl consistency is checked for ALL machines on both runners.
 # This validates the full pipeline:
 #   pkl → config.plist → qemu.cfg → qemu.sh → running QEMU process → REST API
@@ -97,16 +96,10 @@ jobs:
           name: Machines
           path: ./Machines
 
-      - name: Install QEMU packages
+      - name: Install QEMU (both architectures)
         run: |
           sudo apt-get update -y
-          if [ "${{ matrix.runner-arch }}" = "x86_64" ]; then
-            # End users on x86_64 would only have x86 packages — don't install ARM
-            sudo apt-get install -y qemu-system-x86 jq python3 socat
-          else
-            # aarch64 runner: native ARM + x86 for cross-arch testing
-            sudo apt-get install -y qemu-system-arm qemu-efi-aarch64 qemu-system-x86 jq python3 socat
-          fi
+          sudo apt-get install -y qemu-system-x86 qemu-system-arm qemu-efi-aarch64 jq python3 socat
 
       - name: Install Apple pkl
         run: |
@@ -222,15 +215,6 @@ jobs:
             VM_MEM=$(pkl eval -x 'System.MemorySize' "$CFG_PKL")
             VM_CPUS=$(pkl eval -x 'if (System.CPUCount == 0) 1 else System.CPUCount' "$CFG_PKL")
             VM_DISKS=$(pkl eval -x 'Drive.toList().length' "$CFG_PKL")
-
-            # ── Skip non-native machines on x86_64 runner ──
-            # x86_64 end users wouldn't have ARM packages; test only x86_64 machines.
-            # aarch64 runner tests all machines (native + cross-arch via TCG).
-            if [ "$RUNNER_ARCH" = "x86_64" ] && [ "$VM_ARCH" != "x86_64" ]; then
-              echo "  ⊘ Skipping $VMNAME ($VM_ARCH) on $RUNNER_ARCH runner"
-              echo "::endgroup::"
-              continue
-            fi
 
             # ── Determine expected accelerator ──
             # KVM only when host and guest architectures match
