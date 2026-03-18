@@ -377,13 +377,17 @@ actual QEMU process.  Consequences of missing `exec`:
 Running `qemu-system-x86_64` via TCG on an aarch64 host is significantly slower
 than native-architecture TCG.  Known issues:
 
-- `chr.x86_64.qemu` has consistently failed to boot on the aarch64 runner
-  (even with 300s timeout), while `rose.chr.x86_64.qemu` boots in 25-40s
-- The only config difference is drive count (1 vs 5 drives)
-- Root cause under investigation — may be QEMU bug, resource contention from
-  orphaned processes, or SeaBIOS behavior under cross-arch TCG
-- Serial console diagnostics (`socat` to the serial socket) added to CI to
-  capture where the boot hangs
+- x86_64 cross-arch TCG shows ~194% CPU on the aarch64 runner — this confirms
+  the VMs ARE actively booting (not in a boot loop or stuck).  High CPU is normal
+  for TCG translating x86 instructions on ARM.
+- Boot times are highly variable depending on runner hardware: observed 25s to 100s+
+  for the same machine across different runs.  The workflow uses a 120s timeout.
+- The earlier `chr.x86_64.qemu` failures (0% CPU, 300s timeout) were caused by
+  orphaned QEMU processes from the missing `exec` in `nohup sh -c "$CMD"`.  The
+  CPU was measured on the `sh -c` wrapper, not the actual QEMU process.  With the
+  `exec` fix, PID tracking and diagnostics are correct.
+- Serial console diagnostics (`socat` to the serial socket) are available in CI
+  to capture boot progress if timeouts occur.
 
 ## Common Pitfalls
 
@@ -466,10 +470,18 @@ make qemu-list
 
 Similar structure to `libvirt-test.yaml`: build job + 2 test jobs (x86_64 + aarch64).
 
+#### Package installation
+- **x86_64 runner**: installs only `qemu-system-x86` (no ARM packages) — mirrors end-user setup
+- **aarch64 runner**: installs `qemu-system-arm`, `qemu-efi-aarch64`, and `qemu-system-x86`
+  (ARM native + x86 for cross-arch testing)
+
+#### Machine filtering
+- **x86_64 runner**: tests only x86_64 machines (skips aarch64 — no ARM firmware/packages)
+- **aarch64 runner**: tests all machines (native aarch64 + cross-arch x86_64 via TCG)
+
 #### Key differences from libvirt-test.yaml
 - Uses `qemu.sh --background --port $PORT` instead of raw QEMU commands
 - qemu.cfg ↔ config.pkl consistency check (pkl PCF is source of truth)
-- Cross-arch TCG: every runner boots ALL machines (not just its native arch)
 - **KVM cross-arch guard**: qemu.sh checks `HOST_ARCH` matches guest arch before
   using KVM; cross-arch guests always fall back to TCG
 - Unique ports per machine (PORT_BASE + offset) to avoid TCP TIME_WAIT collisions
@@ -481,12 +493,13 @@ Similar structure to `libvirt-test.yaml`: build job + 2 test jobs (x86_64 + aarc
 
 #### Timeouts
 - KVM: 30s (6 × 5s polls)
-- TCG (native or cross-arch): 60s (12 × 5s polls)
+- TCG native: 60s (12 × 5s polls)
+- TCG cross-arch: 120s (24 × 5s polls) — x86_64 on aarch64 can take 60–100s
 
 #### Expected boot times (from CI observations)
 - KVM native: ~20s
 - TCG native: ~20–25s
-- TCG cross-arch (x86 on ARM): ~40s
+- TCG cross-arch (x86 on ARM): ~40–100s (highly variable, depends on runner hardware)
 - TCG cross-arch (ARM on x86): ~20s
 
 ## Development Toolchain (macOS Intel)
