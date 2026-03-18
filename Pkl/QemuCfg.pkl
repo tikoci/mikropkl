@@ -253,10 +253,13 @@ function launchScript(
   # with hostfwd port forwarding (hostfwd is not a --readconfig-supported option).
   NET_FLAGS="-netdev user,id=net0,hostfwd=tcp::${PORT}-:80"
 
-  # ── Display / Serial ──
+  # ── Display / Serial / Monitor ──
   if [ "$BACKGROUND" = "1" ]; then
     SERIAL_SOCK="/tmp/qemu-\(vmName)-serial.sock"
-    DISPLAY_FLAGS="-display none -monitor none"
+    MONITOR_SOCK="/tmp/qemu-\(vmName)-monitor.sock"
+    DISPLAY_FLAGS="-display none"
+    DISPLAY_FLAGS="$DISPLAY_FLAGS -chardev socket,id=monitor0,path=$MONITOR_SOCK,server=on,wait=off"
+    DISPLAY_FLAGS="$DISPLAY_FLAGS -mon chardev=monitor0,mode=readline"
     DISPLAY_FLAGS="$DISPLAY_FLAGS -chardev socket,id=serial0,path=$SERIAL_SOCK,server=on,wait=off"
     DISPLAY_FLAGS="$DISPLAY_FLAGS -serial chardev:serial0"
   else
@@ -286,7 +289,8 @@ function launchScript(
     nohup sh -c "exec $CMD" >/tmp/qemu-\(vmName).log 2>&1 &
     echo $! > /tmp/qemu-\(vmName).pid
     echo "QEMU PID=$! — log: /tmp/qemu-\(vmName).log"
-    echo "Serial: socat - UNIX-CONNECT:$SERIAL_SOCK"
+    echo "Serial:  socat - UNIX-CONNECT:$SERIAL_SOCK"
+    echo "Monitor: socat - UNIX-CONNECT:$MONITOR_SOCK"
   else
     exec $CMD
   fi

@@ -374,20 +374,41 @@ actual QEMU process.  Consequences of missing `exec`:
 
 ### Cross-architecture TCG: x86_64 on aarch64 runner
 
-Running `qemu-system-x86_64` via TCG on an aarch64 host is significantly slower
-than native-architecture TCG.  Known issues:
+Running `qemu-system-x86_64` via TCG on an aarch64 host currently **fails to boot**
+within the 300s timeout.  SeaBIOS under cross-arch TCG appears unable to complete
+firmware initialization — the guest consumes ~199% CPU but produces zero serial
+output and never reaches the point of serving HTTP.
 
-- x86_64 cross-arch TCG shows ~194% CPU on the aarch64 runner — this confirms
-  the VMs ARE actively booting (not in a boot loop or stuck).  High CPU is normal
-  for TCG translating x86 instructions on ARM.
-- Boot times are highly variable depending on runner hardware: observed 25s to 100s+
-  for the same machine across different runs.  The workflow uses a 300s timeout.
-- The earlier `chr.x86_64.qemu` failures (0% CPU, 300s timeout) were caused by
+Observed in CI runs #9 (v7.22) and #10 (v7.23beta2) — same failure, ruling out
+RouterOS version as a factor.  Both `chr.x86_64.qemu` and `rose.chr.x86_64.qemu`
+fail identically on the aarch64 runner, while the x86_64 runner handles all 4
+machines (including cross-arch aarch64 via TCG) successfully.
+
+Diagnostic evidence:
+- **Zero serial output**: SeaBIOS never prints its banner — the guest CPU is stuck
+  in very early firmware init (likely x86 real-mode emulation under TCG on ARM64).
+- **~199% CPU for 300s**: Confirms active TCG translation, not a stall — but the
+  translated code never makes progress through the boot sequence.
+- **QEMU stderr log empty**: No QEMU-level errors.
+- **SLIRP port IS listening**: QEMU's user-mode networking initializes, but the
+  guest never responds.
+
+The reverse direction (aarch64 on x86_64 via TCG) works fine — boots in ~20s.
+
+Enhanced diagnostics added to investigate further:
+- QEMU monitor socket (`-mon chardev=monitor0`) — allows `info cpus` and
+  `info registers` queries via `socat` to inspect where the vCPU is stuck.
+- QEMU debug logging (`-d guest_errors,unimp -D <logfile>`) — captures
+  unimplemented instruction/device access during TCG translation.
+- CI workflow dumps monitor register state and debug log on timeout.
+
+Previous history:
+- The _earlier_ `chr.x86_64.qemu` failures (0% CPU, 300s timeout) were caused by
   orphaned QEMU processes from the missing `exec` in `nohup sh -c "$CMD"`.  The
-  CPU was measured on the `sh -c` wrapper, not the actual QEMU process.  With the
-  `exec` fix, PID tracking and diagnostics are correct.
-- Serial console diagnostics (`socat` to the serial socket) are available in CI
-  to capture boot progress if timeouts occur.
+  `exec` fix corrected PID tracking, revealing the true ~199% CPU pattern.
+- The CLAUDE.md previously documented 40–100s boot times for this combination,
+  suggesting it may have worked at some point (possibly with different QEMU or
+  runner hardware).
 
 ## Common Pitfalls
 
@@ -483,8 +504,12 @@ Similar structure to `libvirt-test.yaml`: build job + 2 test jobs (x86_64 + aarc
 
 #### Boot diagnostics
 - Each poll attempt logs process state and CPU% (`/proc/$PID/stat`, `ps -o %cpu`)
-- On timeout: dumps QEMU stderr log, `ps` process info, and `ss` listening ports
+- QEMU debug logging: `-d guest_errors,unimp -D <logfile>` via `QEMU_EXTRA` env var
+- QEMU monitor socket: `socat` queries `info cpus` / `info registers` on timeout
+- On timeout: dumps QEMU stderr log, debug log, monitor register state, `ps` info,
+  and `ss` listening ports
 - Early exit if QEMU process dies during boot wait
+- Debug logs uploaded as artifacts for post-mortem analysis
 
 #### Timeouts
 - KVM: 30s (6 × 5s polls)
@@ -494,8 +519,8 @@ Similar structure to `libvirt-test.yaml`: build job + 2 test jobs (x86_64 + aarc
 #### Expected boot times (from CI observations)
 - KVM native: ~20s
 - TCG native: ~20–25s
-- TCG cross-arch (x86 on ARM): ~40–100s (highly variable, depends on runner hardware)
 - TCG cross-arch (ARM on x86): ~20s
+- TCG cross-arch (x86 on ARM): **currently fails** (300s timeout, see Known Limitations)
 
 ## Development Toolchain (macOS Intel)
 

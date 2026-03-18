@@ -101,6 +101,14 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-system-x86 qemu-system-arm qemu-efi-aarch64 jq python3 socat
 
+      - name: Log QEMU versions
+        run: |
+          echo "::group::QEMU versions"
+          qemu-system-x86_64 --version 2>/dev/null || echo "qemu-system-x86_64 not installed"
+          qemu-system-aarch64 --version 2>/dev/null || echo "qemu-system-aarch64 not installed"
+          uname -m
+          echo "::endgroup::"
+
       - name: Install Apple pkl
         run: |
           curl -fsSL -o pkl "https://github.com/apple/pkl/releases/download/${{ inputs.pklversion }}/pkl-linux-${{ matrix.pkl-arch }}"
@@ -243,10 +251,14 @@ jobs:
 
             # ── Clean stale files and start via qemu.sh ──
             SERIAL_LOG="/tmp/qemu-${VMNAME}-serial.log"
+            DEBUG_LOG="/tmp/qemu-${VMNAME}-debug.log"
             rm -f "/tmp/qemu-${VMNAME}.pid" "/tmp/qemu-${VMNAME}.log" \
                   "/tmp/qemu-${VMNAME}-serial.sock" "/tmp/qemu-${VMNAME}-vars.fd" \
-                  "$SERIAL_LOG"
-            sh "$UTM_DIR/qemu.sh" --background --port "$PORT"
+                  "/tmp/qemu-${VMNAME}-monitor.sock" \
+                  "$SERIAL_LOG" "$DEBUG_LOG"
+            # Enable QEMU guest error/unimplemented instruction logging for diagnostics
+            QEMU_EXTRA="-d guest_errors,unimp -D $DEBUG_LOG" \
+              sh "$UTM_DIR/qemu.sh" --background --port "$PORT"
             sleep 2
 
             # ── Start serial capture immediately (socat in background) ──
@@ -348,8 +360,25 @@ jobs:
 
             if [ "$BOOTED" = "0" ]; then
               echo "::error::$VMNAME: boot timeout after $((TIMEOUT_ATTEMPTS * POLL))s"
-              echo "--- QEMU log ---"
+              echo "--- QEMU stderr log ---"
               cat "/tmp/qemu-${VMNAME}.log" 2>/dev/null | tail -20 || echo "(empty)"
+              echo "--- QEMU debug log (guest_errors,unimp) ---"
+              if [ -s "/tmp/qemu-${VMNAME}-debug.log" ]; then
+                wc -l < "/tmp/qemu-${VMNAME}-debug.log" | xargs -I{} echo "  ({} lines total)"
+                tail -30 "/tmp/qemu-${VMNAME}-debug.log"
+              else
+                echo "(no debug output — no guest errors or unimplemented instructions)"
+              fi
+              echo "--- QEMU monitor: CPU state ---"
+              MONITOR_SOCK="/tmp/qemu-${VMNAME}-monitor.sock"
+              if [ -S "$MONITOR_SOCK" ]; then
+                # Query CPU registers via HMP monitor to see where guest is stuck
+                echo "info cpus" | socat - UNIX-CONNECT:"$MONITOR_SOCK" 2>/dev/null | head -10 || echo "(monitor query failed)"
+                sleep 0.5
+                echo "info registers" | socat - UNIX-CONNECT:"$MONITOR_SOCK" 2>/dev/null | head -30 || echo "(monitor query failed)"
+              else
+                echo "(no monitor socket available)"
+              fi
               echo "--- Process info (QEMU pid=$QEMU_PID, wrapper pid=$PID) ---"
               ps -p "$QEMU_PID" -o pid,stat,%cpu,%mem,time,args 2>/dev/null || echo "(QEMU process ended)"
               if [ "$QEMU_PID" != "$PID" ]; then
@@ -446,3 +475,4 @@ jobs:
           path: |
             /tmp/qemu-*.log
             /tmp/qemu-*-serial.log
+            /tmp/qemu-*-debug.log

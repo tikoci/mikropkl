@@ -109,7 +109,9 @@ Implemented in `Pkl/QemuCfg.pkl`.  Generates `qemu.cfg` (QEMU --readconfig ini) 
 - `qemu-test.yaml` CI workflow: both x86_64 and aarch64 runners test ALL machines
   (native via KVM/TCG, cross-arch via TCG with 300s timeout).  Both runners verify
   qemu.cfg ↔ config.pkl consistency.  Boot diagnostics log process state and CPU
-  usage during the wait loop.
+  usage during the wait loop.  QEMU debug logging (`-d guest_errors,unimp`) and
+  monitor socket (`info cpus`/`info registers` via socat) provide post-mortem data
+  on timeout.
 
 **Limitations documented in generated files:**
 - QEMU `--readconfig` cannot express: pflash drives, `-accel`, `-netdev user,hostfwd`,
@@ -240,9 +242,9 @@ different architecture.  Running `qemu-system-aarch64 -accel kvm` on an x86_64 h
 (or vice versa) crashes immediately.  `qemu.sh` gates KVM usage on
 `[ "$HOST_ARCH" = "<guest-arch>" ]` so cross-architecture guests always fall back to
 TCG.  Cross-arch TCG emulation is viable for CI — aarch64 CHR boots on an x86_64
-runner in ~20s, x86_64 CHR boots on an ARM64 runner in ~40–100s (highly variable
-depending on runner hardware; 300s timeout is used).  High CPU (~194%) during cross-arch
-TCG is normal and confirms active emulation, not a boot loop.
+runner in ~20s, but x86_64 CHR on an ARM64 runner currently **fails** (SeaBIOS never
+completes firmware init under cross-arch TCG; see CLAUDE.md "Known Limitations").
+High CPU (~194%) during cross-arch TCG is normal and confirms active emulation.
 
 ### Why SLIRP networking (not bridge/tap)
 

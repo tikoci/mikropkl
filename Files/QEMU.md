@@ -215,7 +215,8 @@ Output:
 ```
 Starting chr.x86_64.qemu (port 9180, accel=kvm)...
 QEMU PID=12345 — log: /tmp/qemu-chr.x86_64.qemu.log
-Serial: socat - UNIX-CONNECT:/tmp/qemu-chr.x86_64.qemu-serial.sock
+Serial:  socat - UNIX-CONNECT:/tmp/qemu-chr.x86_64.qemu-serial.sock
+Monitor: socat - UNIX-CONNECT:/tmp/qemu-chr.x86_64.qemu-monitor.sock
 ```
 
 Background mode:
@@ -223,7 +224,9 @@ Background mode:
 - Logs go to `/tmp/qemu-<vmname>.log`
 - Process PID is written to `/tmp/qemu-<vmname>.pid`
 - Serial console is available via Unix socket
+- QEMU monitor is available via Unix socket (for `info registers`, `info cpus`, etc.)
 - To access serial console: `socat - UNIX-CONNECT:/tmp/qemu-chr.x86_64.qemu-serial.sock`
+- To access monitor: `socat - UNIX-CONNECT:/tmp/qemu-chr.x86_64.qemu-monitor.sock`
 
 ### Stop a Background Instance
 
@@ -380,6 +383,20 @@ socat - UNIX-CONNECT:/tmp/qemu-chr.x86_64.qemu-serial.sock
 
 Then type RouterOS commands.  Press `Ctrl+D` to exit.
 
+### QEMU Monitor (Background Mode)
+
+In background mode, a QEMU human monitor protocol (HMP) socket is exposed for diagnostics:
+
+```bash
+# Interactive monitor session
+socat - UNIX-CONNECT:/tmp/qemu-chr.x86_64.qemu-monitor.sock
+
+# One-shot commands
+echo "info cpus" | socat - UNIX-CONNECT:/tmp/qemu-chr.x86_64.qemu-monitor.sock
+echo "info registers" | socat - UNIX-CONNECT:/tmp/qemu-chr.x86_64.qemu-monitor.sock
+echo "info block" | socat - UNIX-CONNECT:/tmp/qemu-chr.x86_64.qemu-monitor.sock
+```
+
 ## Environment Variables for Advanced Use
 
 You can override defaults by setting environment variables:
@@ -426,6 +443,7 @@ You can override defaults by setting environment variables:
 - Output logged to `/tmp/qemu-<vmname>.log`
 - Process PID saved in `/tmp/qemu-<vmname>.pid`
 - Serial console accessible via Unix socket (`socat`)
+- QEMU monitor accessible via Unix socket (for `info registers`, `info cpus`, etc.)
 - Suitable for automation, CI/CD, long-running tests
 
 **Use when:**
@@ -552,6 +570,21 @@ Common causes:
 - Missing UEFI firmware (aarch64)
 - Wrong disk image path
 - Hardware acceleration not available and TCG failed to initialize
+
+### x86_64 cross-architecture boot on ARM64 host
+
+Running `qemu-system-x86_64` via TCG on an aarch64 host is significantly slower than any other combination due to x86 real-mode emulation overhead.  The x86 CHR image uses SeaBIOS with a proprietary boot sector that requires intensive real-mode x86 instruction translation.
+
+Boot times can reach 40s–120s+ and may be unreliable depending on QEMU version and host hardware.  If the VM appears stuck (high CPU but no serial output), use the QEMU monitor socket to inspect:
+
+```bash
+# Check where the vCPU is stuck (background mode)
+echo "info cpus" | socat - UNIX-CONNECT:/tmp/qemu-chr.x86_64.qemu-monitor.sock
+echo "info registers" | socat - UNIX-CONNECT:/tmp/qemu-chr.x86_64.qemu-monitor.sock
+
+# Enable debug logging for diagnosis
+QEMU_EXTRA="-d guest_errors,unimp -D /tmp/qemu-debug.log" ./qemu.sh --background
+```
 
 ### Port conflict (address already in use)
 
