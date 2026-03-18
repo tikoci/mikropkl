@@ -19,8 +19,11 @@ The project has three output layers, each derived from the same pkl manifests:
         ├─→ libvirt.xml              Linux/QEMU — CI testing
         │     (in-bundle, QEMU backend only)
         │
-        └─→ [planned] qemu.cfg      Linux/QEMU — portable bare-metal
-              (QEMU --readconfig ini format)
+        ├─→ qemu.cfg                 Linux/QEMU — portable bare-metal
+        │     (QEMU --readconfig ini format, in-bundle)
+        │
+        └─→ qemu.sh                  Launch script for qemu.cfg
+              (handles pflash, accel, networking, serial)
 ```
 
 The `.utm` directory IS a ZIP archive — this is the key insight for Linux deployment.
@@ -91,46 +94,24 @@ to get the real file size — without `-L`, `stat` returns the symlink path leng
 
 ## Planned Work Items
 
-### 1. QEMU `--readconfig` / ini config file (Priority: High)
+### 1. QEMU `--readconfig` / ini config file — ✅ IMPLEMENTED
 
-Generate a `qemu.cfg` alongside `libvirt.xml` for each QEMU machine.  This is more
-portable than libvirt XML because:
-- No libvirt daemon required
-- No XML parsing needed at launch time
-- Self-contained machine configuration
-- Can embed QEMU-specific options that libvirt doesn't expose
+Implemented in `Pkl/QemuCfg.pkl`.  Generates `qemu.cfg` (QEMU --readconfig ini) and
+`qemu.sh` (companion launcher) alongside `libvirt.xml` for each QEMU machine.
 
-**Implementation plan:**
-- Add `QemuCfg.pkl` module (parallel to `Libvirt.pkl`)
-- INI format with `[machine]`, `[memory]`, `[drive "driveN"]`, `[netdev]`, etc.
-- Include architecture-specific sections (pflash for aarch64, SeaBIOS for x86)
-- Gate output on `backend == "QEMU"` like libvirt.xml
-- Add `make qemu-run` target that launches via `qemu-system-* --readconfig qemu.cfg`
+**What was built:**
+- `QemuCfg.pkl` module with `config()` and `launchScript()` functions
+- `qemu.cfg` covers: `[machine]`, `[memory]`, `[smp-opts]`, `[drive]`, `[device]`
+- `qemu.sh` handles: UEFI pflash (aarch64), KVM/HVF/TCG detection, networking
+  with port forwarding, display/serial config, `--background`/`--dry-run` modes
+- Makefile targets: `qemu-list`, `qemu-fixpaths`, `qemu-chmod`, `qemu-run`, `qemu-stop`
+- `qemu-test.yaml` CI workflow boots each machine via `qemu.sh` and runs REST API checks
 
-**QEMU config file format reference:**
-```ini
-[machine]
-  type = "q35"
-
-[memory]
-  size = "1024M"
-
-[smp-opts]
-  cpus = "2"
-
-[drive "drive0"]
-  file = "/path/to/disk.img"
-  format = "raw"
-  if = "virtio"
-
-[netdev "net0"]
-  type = "user"
-  hostfwd = "tcp::9180-:80"
-
-[device "nic0"]
-  driver = "virtio-net-pci"
-  netdev = "net0"
-```
+**Limitations documented in generated files:**
+- QEMU `--readconfig` cannot express: pflash drives, `-accel`, `-netdev user,hostfwd`,
+  display/serial config.  These are handled by `qemu.sh`.
+- `qemu.cfg` uses `/QEMU_DATA_PATH/` sentinel (like libvirt's `/LIBVIRT_DATA_PATH/`)
+  replaced by `make qemu-fixpaths`; `qemu.sh` resolves paths at runtime automatically.
 
 ### 2. macOS CI Workflow for UTM Validation (Priority: High)
 

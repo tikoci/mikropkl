@@ -24,6 +24,7 @@ Templates/            ← mid-level pkl templates (amend Pkl/utmzip.pkl)
 Pkl/                  ← core pkl modules
   utmzip.pkl          ← root module: defines all file outputs for a .utm bundle
   Libvirt.pkl         ← generates libvirt.xml from UTM config fields (QEMU only)
+  QemuCfg.pkl         ← generates qemu.cfg (ini) + qemu.sh (launcher) for direct QEMU use
   CHR.pkl             ← RouterOS CHR download URL logic and SVG icon helpers
   UTM.pkl             ← UTM-specific types (SystemArchitecture, BackendType, etc.)
   Randomish.pkl       ← deterministic pseudo-random helpers (MAC address generation)
@@ -39,6 +40,7 @@ Lab/                  ← local experiments, debug scripts, investigation notes 
 .github/workflows/
   chr.yaml            ← builds and releases UTM packages to GitHub Releases
   libvirt-test.yaml   ← boots each QEMU machine in CI and checks installation
+  qemu-test.yaml      ← boots each QEMU machine via qemu.sh and runs REST API checks
   auto.yaml           ← automated trigger for chr.yaml on new RouterOS versions
 ```
 
@@ -196,12 +198,15 @@ The Makefile runs in **two recursive phases**:
      - `*.size` — qcow2 disk size in MiB (for `qemu-img create`)
      - `*.localcp` — filename of a file to copy from `Files/`
    - Also emits `libvirt.xml` (QEMU machines only) with `/LIBVIRT_DATA_PATH/` sentinel in disk paths
+   - Also emits `qemu.cfg` + `qemu.sh` (QEMU machines only) with `/QEMU_DATA_PATH/` sentinel
 
 2. **`make phase2`** → resolves placeholders:
    - `*.img.zip.url` → `wget` + `unzip` → raw `.img` disk
    - `*.size` → `qemu-img create -f qcow2`
    - `*.localcp` → `cp` from `Files/`
    - `libvirt-fixpaths` → replaces `/LIBVIRT_DATA_PATH/` sentinel with real absolute paths
+   - `qemu-fixpaths` → replaces `/QEMU_DATA_PATH/` sentinel with real absolute paths
+   - `qemu-chmod` → makes `qemu.sh` scripts executable
 
 Running `make` triggers `phase1` then recursively calls `make phase2`.
 
@@ -212,6 +217,7 @@ Manifests/chr.x86_64.qemu.pkl
   amends Templates/chr.utmzip.pkl
     extends Pkl/utmzip.pkl          ← main output module
       imports Pkl/Libvirt.pkl       ← produces libvirt.xml (QEMU only)
+      imports Pkl/QemuCfg.pkl       ← produces qemu.cfg + qemu.sh (QEMU only)
       imports Pkl/Randomish.pkl     ← MAC address
       imports Pkl/CHR.pkl           ← download URL, icon SVG
       imports Pkl/UTM.pkl           ← types
@@ -365,9 +371,11 @@ See `Lab/x86-direct-kernel/NOTES.md` for full analysis.
   `make clean` before builds if you need a pristine state.
 - **libvirt-fixpaths writes absolute paths**: If you move the `Machines/` directory,
   re-run `make libvirt-fixpaths` or re-run `make` from scratch.
+- **qemu-fixpaths writes absolute paths**: Same as libvirt-fixpaths but for `qemu.cfg`.
+  `qemu.sh` resolves paths at runtime so it doesn't need fixpaths.
 - **macOS libvirt**: Not a supported testing configuration.  Use UTM for macOS.
-- **Apple backend machines**: Do NOT get a `libvirt.xml` — the `when (backend == "QEMU")`
-  gate in `utmzip.pkl` prevents it.
+- **Apple backend machines**: Do NOT get a `libvirt.xml` or `qemu.cfg` — the
+  `when (backend == "QEMU")` gate in `utmzip.pkl` prevents it.
 
 ## Build Commands
 
@@ -384,8 +392,20 @@ pkl eval ./Manifests/*.pkl -m ./Machines
 # Fix libvirt paths after pkl runs (normally automatic in phase2)
 make libvirt-fixpaths
 
+# Fix qemu.cfg paths and make qemu.sh executable (normally automatic in phase2)
+make qemu-fixpaths qemu-chmod
+
 # Validate libvirt XML
 make libvirt-validate   # requires: brew install libvirt (macOS) or apt libvirt-clients (Linux)
+
+# Run a QEMU machine via qemu.sh (after build)
+make qemu-run QEMU_UTM=Machines/chr.x86_64.qemu.7.22.utm
+
+# Stop a running QEMU machine
+make qemu-stop QEMU_UTM=Machines/chr.x86_64.qemu.7.22.utm
+
+# List all qemu.cfg files
+make qemu-list
 ```
 
 ## Adding a New Machine
@@ -409,6 +429,7 @@ make libvirt-validate   # requires: brew install libvirt (macOS) or apt libvirt-
 | `chr.yaml` | manual dispatch | Builds and publishes UTM packages to GitHub Releases |
 | `auto.yaml` | scheduled | Triggers `chr.yaml` when a new RouterOS version is detected |
 | `libvirt-test.yaml` | manual dispatch | Boots all QEMU machines in CI and checks installation |
+| `qemu-test.yaml` | manual dispatch | Boots each QEMU machine via qemu.sh and runs REST API checks |
 
 ## Development Toolchain (macOS Intel)
 
@@ -473,13 +494,6 @@ runners with UTM/Virtualization.framework support.  A new workflow could:
 - Validate that `utm://downloadVM?url=` install links work
 
 This would complement the existing `libvirt-test.yaml` by covering the Apple backend.
-
-### QEMU `--readconfig` / ini config file support
-
-QEMU supports loading configuration from `.cfg` ini-style files via `--readconfig`.
-The project could generate a `qemu.cfg` alongside `libvirt.xml` for each QEMU machine,
-providing a self-contained QEMU launch config that doesn't require extracting flags
-from XML.  This would be more portable than libvirt.xml for bare-metal QEMU deployments.
 
 ### UTM bundle as Linux deployment format
 

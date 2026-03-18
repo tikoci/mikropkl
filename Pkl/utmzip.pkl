@@ -4,6 +4,7 @@ import "UTM.pkl"
 import "URL.pkl"
 import "SVG.pkl"
 import "Libvirt.pkl"
+import "QemuCfg.pkl"
 
 name : String
 
@@ -118,6 +119,35 @@ output {
     when (backend == "QEMU") {
       ["\(name).utm/libvirt.xml"] {
         text = Libvirt.domain(
+          name,
+          architecture,
+          memory.toUnit("mib").value.toInt(),
+          if (cpus == 0) 1 else cpus,
+          List(imageDownloadUrl.filename)
+            + additionalDisks.mapIndexed((i, _e) -> "qdisk\(i).qcow2"),
+          Randomish.macAddress(name, 0, "e"),
+          notes
+        )
+      }
+    }
+
+    // QEMU --readconfig ini file (QEMU backend only)
+    // Self-contained QEMU launch config — no XML parsing or libvirt needed
+    when (backend == "QEMU") {
+      ["\(name).utm/qemu.cfg"] {
+        text = QemuCfg.config(
+          name,
+          architecture,
+          memory.toUnit("mib").value.toInt(),
+          if (cpus == 0) 1 else cpus,
+          List(imageDownloadUrl.filename)
+            + additionalDisks.mapIndexed((i, _e) -> "qdisk\(i).qcow2"),
+          Randomish.macAddress(name, 0, "e"),
+          notes
+        )
+      }
+      ["\(name).utm/qemu.sh"] {
+        text = QemuCfg.launchScript(
           name,
           architecture,
           memory.toUnit("mib").value.toInt(),

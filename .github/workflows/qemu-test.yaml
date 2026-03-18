@@ -1,0 +1,275 @@
+name: "Test: QEMU Direct Boot"
+
+# Builds each QEMU manifest and boots it via the generated qemu.sh launch script.
+# Unlike libvirt-test.yaml, this uses the pkl-generated qemu.cfg + qemu.sh directly
+# — no XML parsing or libvirt dependency needed.
+#
+# Verification: GET calls to REST API endpoints (/system/resource, /interface,
+# /ip/address, /ip/route, /ipv6/address, /ipv6/route) plus POST check-installation.
+# check-installation is skipped on aarch64 (ARM checker always fails in QEMU).
+
+on:
+  workflow_dispatch:
+    inputs:
+      rosver:
+        type: string
+        description: 'RouterOS Version (e.g. 7.22, 7.22rc2, 7.22beta4, stable)'
+        required: true
+        default: "stable"
+      pklversion:
+        type: string
+        description: 'pkl Version'
+        required: true
+        default: "0.30.2"
+
+jobs:
+  # ── Phase 1: build all QEMU machine bundles ───────────────────────────────
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      qemu-machines: ${{ steps.list-machines.outputs.machines }}
+      chr-version: ${{ steps.resolve-version.outputs.version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-utils wget make unzip jq
+
+      - name: Install Apple pkl
+        run: |
+          curl -L -o pkl "https://github.com/apple/pkl/releases/download/${{ github.event.inputs.pklversion }}/pkl-linux-amd64"
+          chmod +x pkl
+          ./pkl --version
+          sudo cp ./pkl /usr/local/bin/pkl
+
+      - name: Resolve RouterOS version
+        id: resolve-version
+        run: |
+          VERSION=$(CHR_VERSION=${{ github.event.inputs.rosver }} pkl eval ./Pkl/chr-version.pkl)
+          echo "Resolved RouterOS version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build machine bundles (make)
+        run: make CHR_VERSION=${{ steps.resolve-version.outputs.version }}
+
+      - name: List QEMU machines with qemu.cfg
+        id: list-machines
+        run: |
+          machines=$(ls Machines/ | grep '\.utm$' | while read -r d; do
+            [ -f "Machines/$d/qemu.cfg" ] && echo "$d"
+          done | jq -R -s -c 'split("\n")[:-1]')
+          echo "QEMU machines: $machines"
+          echo "machines=$machines" >> $GITHUB_OUTPUT
+
+      - name: Upload built Machines as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Machines
+          path: ./Machines
+          retention-days: 1
+
+  # ── Phase 2: boot-test — one job per machine, arch-matched runner ──────────
+  test:
+    needs: build
+    strategy:
+      matrix:
+        machine: ${{ fromJSON(needs.build.outputs.qemu-machines) }}
+      fail-fast: false
+
+    # Select runner by architecture in the machine directory name.
+    runs-on: ${{ contains(matrix.machine, 'aarch64') && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+
+    env:
+      QEMU_UTM: ./Machines/${{ matrix.machine }}
+      API_BASE: http://admin:@localhost:9180/rest
+      HEALTH_URL: http://localhost:9180
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download built Machines artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Machines
+          path: ./Machines
+
+      - name: Detect architecture
+        id: arch
+        run: |
+          if echo "${{ matrix.machine }}" | grep -q 'aarch64'; then
+            echo "arch=aarch64" >> $GITHUB_OUTPUT
+            echo "bin=qemu-system-aarch64" >> $GITHUB_OUTPUT
+          else
+            echo "arch=x86_64" >> $GITHUB_OUTPUT
+            echo "bin=qemu-system-x86_64" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install QEMU
+        run: |
+          sudo apt-get update -y
+          if [ "${{ steps.arch.outputs.arch }}" = "aarch64" ]; then
+            sudo apt-get install -y qemu-system-arm qemu-efi-aarch64
+          else
+            sudo apt-get install -y qemu-system-x86
+          fi
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+          if ls -la /dev/kvm 2>/dev/null; then
+            echo "KVM_AVAIL=1" >> $GITHUB_ENV
+            echo "KVM is available."
+          else
+            echo "KVM_AVAIL=0" >> $GITHUB_ENV
+            echo "::warning::KVM not available — QEMU will use software emulation (slower)"
+          fi
+
+      - name: Configure boot timeout
+        run: |
+          if [ "$KVM_AVAIL" = "1" ]; then
+            echo "BOOT_TIMEOUT_ATTEMPTS=12" >> $GITHUB_ENV
+          elif [ "${{ steps.arch.outputs.arch }}" = "aarch64" ]; then
+            echo "BOOT_TIMEOUT_ATTEMPTS=24" >> $GITHUB_ENV
+          else
+            echo "BOOT_TIMEOUT_ATTEMPTS=18" >> $GITHUB_ENV
+          fi
+
+      - name: Make qemu.sh executable and fix paths
+        run: |
+          make qemu-fixpaths qemu-chmod
+
+      - name: Start RouterOS CHR via qemu.sh
+        run: |
+          echo "Launching ${{ matrix.machine }} via qemu.sh..."
+          sh "$QEMU_UTM/qemu.sh" --background --port 9180
+          sleep 15
+          VMNAME=$(basename "$QEMU_UTM" .utm)
+          PID_FILE="/tmp/qemu-${VMNAME}.pid"
+          if [ -f "$PID_FILE" ]; then
+            PID=$(cat "$PID_FILE")
+            if kill -0 "$PID" 2>/dev/null; then
+              echo "QEMU is running (PID=$PID)"
+            else
+              echo "::error::QEMU process has already exited"
+              cat "/tmp/qemu-${VMNAME}.log" 2>/dev/null || true
+              exit 1
+            fi
+          else
+            echo "::error::No PID file found"
+            exit 1
+          fi
+
+      - name: Wait for RouterOS HTTP server
+        run: |
+          ATTEMPTS=$BOOT_TIMEOUT_ATTEMPTS
+          echo "Waiting for RouterOS at $HEALTH_URL (up to $((ATTEMPTS * 10))s)..."
+          for i in $(seq 1 "$ATTEMPTS"); do
+            if curl -sS -m 5 --fail "$HEALTH_URL/" > /dev/null 2>&1; then
+              echo "RouterOS HTTP is up after $i attempt(s)."
+              exit 0
+            fi
+            echo "Attempt $i/$ATTEMPTS: not ready yet, retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::RouterOS did not start within $((ATTEMPTS * 10)) seconds"
+          VMNAME=$(basename "$QEMU_UTM" .utm)
+          cat "/tmp/qemu-${VMNAME}.log" 2>/dev/null || true
+          exit 1
+
+      - name: "API: GET /system/resource"
+        run: |
+          echo "Checking $API_BASE/system/resource ..."
+          curl -sS --fail "$API_BASE/system/resource" | python3 -m json.tool | head -30
+
+      - name: "API: GET /interface"
+        run: |
+          echo "Checking $API_BASE/interface ..."
+          curl -sS --fail "$API_BASE/interface" | python3 -m json.tool
+
+      - name: "API: GET /ip/address"
+        run: |
+          echo "Checking $API_BASE/ip/address ..."
+          curl -sS --fail "$API_BASE/ip/address" | python3 -m json.tool
+
+      - name: "API: GET /ip/route"
+        run: |
+          echo "Checking $API_BASE/ip/route ..."
+          curl -sS --fail "$API_BASE/ip/route" | python3 -m json.tool
+
+      - name: "API: GET /ipv6/address"
+        run: |
+          echo "Checking $API_BASE/ipv6/address ..."
+          curl -sS --fail "$API_BASE/ipv6/address" | python3 -m json.tool
+
+      - name: "API: GET /ipv6/route"
+        run: |
+          echo "Checking $API_BASE/ipv6/route ..."
+          curl -sS --fail "$API_BASE/ipv6/route" | python3 -m json.tool
+
+      - name: "API: POST /system/check-installation"
+        id: check-installation
+        run: |
+          ARCH="${{ steps.arch.outputs.arch }}"
+          if [ "$ARCH" = "aarch64" ]; then
+            echo "::notice::Skipping check-installation on aarch64 (ARM checker always fails in QEMU — see CLAUDE.md)"
+            echo "status=skipped-aarch64" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "Calling $API_BASE/system/check-installation (POST with duration=30s) ..."
+          HTTP_CODE=$(curl -sS -o /tmp/check-result.json -w "%{http_code}" -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"duration":"30s"}' \
+            "$API_BASE/system/check-installation")
+          RESULT=$(cat /tmp/check-result.json)
+          echo "HTTP $HTTP_CODE — Response: $RESULT"
+          if [ "$HTTP_CODE" -ge 400 ]; then
+            echo "::error::check-installation failed (HTTP $HTTP_CODE): $RESULT"
+            exit 1
+          fi
+          STATUS=$(echo "$RESULT" | python3 -c "
+          import sys, json
+          try:
+              data = json.load(sys.stdin)
+          except json.JSONDecodeError as e:
+              print('ERROR: invalid JSON: ' + str(e), file=sys.stderr)
+              sys.exit(1)
+          if isinstance(data, list) and len(data) > 0:
+              print(data[-1].get('status', ''))
+          elif isinstance(data, dict):
+              print(data.get('status', ''))
+          else:
+              print('ERROR: unexpected response type: ' + type(data).__name__, file=sys.stderr)
+              sys.exit(1)
+          ")
+          echo "status=$STATUS" >> $GITHUB_OUTPUT
+          if [ "$STATUS" = "installation is ok" ]; then
+            echo "RouterOS installation check passed: $STATUS"
+          else
+            echo "::error::check-installation failed — status: '$STATUS'"
+            exit 1
+          fi
+
+      - name: Upload QEMU log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-log-${{ matrix.machine }}
+          path: /tmp/qemu-*.log
+
+      - name: Stop QEMU
+        if: always()
+        run: |
+          VMNAME=$(basename "$QEMU_UTM" .utm)
+          PID_FILE="/tmp/qemu-${VMNAME}.pid"
+          if [ -f "$PID_FILE" ]; then
+            kill "$(cat "$PID_FILE")" 2>/dev/null || true
+            echo "QEMU stopped."
+          fi
