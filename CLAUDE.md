@@ -374,41 +374,32 @@ actual QEMU process.  Consequences of missing `exec`:
 
 ### Cross-architecture TCG: x86_64 on aarch64 runner
 
-Running `qemu-system-x86_64` via TCG on an aarch64 host currently **fails to boot**
-within the 300s timeout.  SeaBIOS under cross-arch TCG appears unable to complete
-firmware initialization — the guest consumes ~199% CPU but produces zero serial
-output and never reaches the point of serving HTTP.
+Running `qemu-system-x86_64` via TCG on an aarch64 host previously **failed to boot**
+within the 300s timeout.  Root cause: SeaBIOS q35 PCIe initialization plus default device
+probing (floppy, VGA, parallel port, USB) is extremely slow under cross-arch TCG because
+x86 real-mode I/O port emulation on ARM64 is much costlier than ARM MMIO emulation on x86.
 
-Observed in CI runs #9 (v7.22) and #10 (v7.23beta2) — same failure, ruling out
-RouterOS version as a factor.  Both `chr.x86_64.qemu` and `rose.chr.x86_64.qemu`
-fail identically on the aarch64 runner, while the x86_64 runner handles all 4
-machines (including cross-arch aarch64 via TCG) successfully.
+**Workaround (implemented in `QemuCfg.pkl` qemu.sh generator):** When `uname -m` is NOT
+`x86_64`, `qemu.sh` applies two mitigations:
+1. **`pc` (i440fx) machine type** instead of `q35` — simpler PIIX3 chipset, no PCIe
+   topology, dramatically less SeaBIOS initialization work.  The qemu.cfg is sed-edited
+   at launch time (`q35` → `pc`); the cfg file itself is unchanged.
+2. **`-nodefaults`** — eliminates probing for floppy, parallel port, VGA, USB controllers.
+   UTM itself uses `-nodefaults -vga none` in its QEMU launcher.  The explicit `-serial`
+   flag still creates an ISA serial port despite `-nodefaults`.
 
-Diagnostic evidence:
-- **Zero serial output**: SeaBIOS never prints its banner — the guest CPU is stuck
-  in very early firmware init (likely x86 real-mode emulation under TCG on ARM64).
-- **~199% CPU for 300s**: Confirms active TCG translation, not a stall — but the
-  translated code never makes progress through the boot sequence.
-- **QEMU stderr log empty**: No QEMU-level errors.
-- **SLIRP port IS listening**: QEMU's user-mode networking initializes, but the
-  guest never responds.
+The `if=virtio` drive shorthand resolves to `virtio-blk-pci` on `pc` (same as `q35`), and
+`virtio-net-pci` works identically.  RouterOS CHR does not depend on q35-specific features.
+
+Diagnostic evidence from before the workaround:
+- **Zero serial output**: SeaBIOS never printed its banner — stuck in early real-mode init.
+- **~199% CPU for 300s**: Active TCG translation, but never making progress.
+- **QEMU stderr/debug logs empty**: No QEMU-level errors or unimplemented instructions.
+- **SLIRP port listening but no guest response**: QEMU networking initialized, guest didn't.
 
 The reverse direction (aarch64 on x86_64 via TCG) works fine — boots in ~20s.
-
-Enhanced diagnostics added to investigate further:
-- QEMU monitor socket (`-mon chardev=monitor0`) — allows `info cpus` and
-  `info registers` queries via `socat` to inspect where the vCPU is stuck.
-- QEMU debug logging (`-d guest_errors,unimp -D <logfile>`) — captures
-  unimplemented instruction/device access during TCG translation.
-- CI workflow dumps monitor register state and debug log on timeout.
-
-Previous history:
-- The _earlier_ `chr.x86_64.qemu` failures (0% CPU, 300s timeout) were caused by
-  orphaned QEMU processes from the missing `exec` in `nohup sh -c "$CMD"`.  The
-  `exec` fix corrected PID tracking, revealing the true ~199% CPU pattern.
-- The CLAUDE.md previously documented 40–100s boot times for this combination,
-  suggesting it may have worked at some point (possibly with different QEMU or
-  runner hardware).
+The asymmetry is because EDK2/UEFI starts in 64-bit mode with MMIO (simpler for TCG),
+while SeaBIOS starts in 16-bit real mode with I/O ports (complex for ARM64 TCG).
 
 ## Common Pitfalls
 
@@ -520,7 +511,7 @@ Similar structure to `libvirt-test.yaml`: build job + 2 test jobs (x86_64 + aarc
 - KVM native: ~20s
 - TCG native: ~20–25s
 - TCG cross-arch (ARM on x86): ~20s
-- TCG cross-arch (x86 on ARM): **currently fails** (300s timeout, see Known Limitations)
+- TCG cross-arch (x86 on ARM): **workaround applied** — `pc` + `-nodefaults` (see Known Limitations)
 
 ## Development Toolchain (macOS Intel)
 

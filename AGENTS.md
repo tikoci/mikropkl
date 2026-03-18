@@ -242,9 +242,25 @@ different architecture.  Running `qemu-system-aarch64 -accel kvm` on an x86_64 h
 (or vice versa) crashes immediately.  `qemu.sh` gates KVM usage on
 `[ "$HOST_ARCH" = "<guest-arch>" ]` so cross-architecture guests always fall back to
 TCG.  Cross-arch TCG emulation is viable for CI — aarch64 CHR boots on an x86_64
-runner in ~20s, but x86_64 CHR on an ARM64 runner currently **fails** (SeaBIOS never
-completes firmware init under cross-arch TCG; see CLAUDE.md "Known Limitations").
+runner in ~20s, but x86_64 CHR on an ARM64 runner required workarounds (see below).
 High CPU (~194%) during cross-arch TCG is normal and confirms active emulation.
+
+### Why `pc` + `-nodefaults` for cross-arch x86_64 on ARM
+
+SeaBIOS q35 PCIe initialization plus default device probing (floppy, VGA, parallel
+port, USB) is extremely slow under cross-arch TCG — x86 real-mode I/O port emulation
+on ARM64 has no hardware equivalent (ARM uses MMIO exclusively).  The combination of
+q35's ICH9/PCIe topology and SeaBIOS's exhaustive device scan causes the guest to
+consume ~199% CPU for 5+ minutes without ever printing SeaBIOS's banner.
+
+`qemu.sh` detects `uname -m != x86_64` and applies two mitigations:
+1. **`pc` (i440fx)** instead of `q35` — simpler PIIX3 chipset, no PCIe topology.
+   The sed-edited qemu.cfg replaces `type = "q35"` with `type = "pc"` at launch.
+2. **`-nodefaults`** — eliminates floppy, parallel port, VGA, USB controller probing.
+   UTM itself uses `-nodefaults -vga none` in its QEMU launcher.
+
+RouterOS CHR doesn't depend on q35-specific features — `if=virtio` resolves to
+`virtio-blk-pci` on both `pc` and `q35`, and `virtio-net-pci` works identically.
 
 ### Why SLIRP networking (not bridge/tap)
 

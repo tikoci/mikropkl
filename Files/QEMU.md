@@ -573,9 +573,15 @@ Common causes:
 
 ### x86_64 cross-architecture boot on ARM64 host
 
-Running `qemu-system-x86_64` via TCG on an aarch64 host is significantly slower than any other combination due to x86 real-mode emulation overhead.  The x86 CHR image uses SeaBIOS with a proprietary boot sector that requires intensive real-mode x86 instruction translation.
+Running `qemu-system-x86_64` via TCG on an aarch64 host is significantly slower than any other combination due to x86 real-mode emulation overhead.  SeaBIOS on q35 performs PCIe initialization and exhaustive device probing (floppy, VGA, parallel port, USB) that is extremely slow under cross-arch TCG because ARM64 has no I/O port space equivalent.
 
-Boot times can reach 40s–120s+ and may be unreliable depending on QEMU version and host hardware.  If the VM appears stuck (high CPU but no serial output), use the QEMU monitor socket to inspect:
+`qemu.sh` automatically detects cross-arch and applies two mitigations:
+1. **`pc` (i440fx) machine type** instead of `q35` — simpler PIIX3 chipset, no PCIe
+2. **`-nodefaults`** — eliminates unnecessary device probing
+
+UTM itself uses `-nodefaults -vga none` for its QEMU launches.  These changes do not affect the qemu.cfg on disk (which retains `q35` for native use); the cfg is sed-edited at launch.
+
+If the VM still appears stuck (high CPU but no serial output), use the QEMU monitor socket to inspect:
 
 ```bash
 # Check where the vCPU is stuck (background mode)

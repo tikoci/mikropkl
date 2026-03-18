@@ -100,18 +100,18 @@ jobs:
 
       - name: Install QEMU (both architectures)
         run: |
-          echo "::group::Install QEMU and tools"
+          echo "::group::Run apt-get update"
           sudo DEBIAN_FRONTEND=noninteractive apt-get update -q
+          echo "::endgroup::"
+          echo "::group::Install QEMU and tools"
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends qemu-system-x86 qemu-system-arm qemu-efi-aarch64 jq python3 socat
           echo "::endgroup::"
 
       - name: Log QEMU versions
         run: |
-          echo "::group::QEMU versions"
           qemu-system-x86_64 --version 2>/dev/null || echo "qemu-system-x86_64 not installed"
           qemu-system-aarch64 --version 2>/dev/null || echo "qemu-system-aarch64 not installed"
           uname -m
-          echo "::endgroup::"
 
       - name: Install Apple pkl
         run: |
