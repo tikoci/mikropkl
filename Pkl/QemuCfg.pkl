@@ -161,9 +161,11 @@ function launchScript(
   # ── Accelerator detection ──
   ACCEL="${QEMU_ACCEL:-}"
   if [ -z "$ACCEL" ]; then
+    HOST_ARCH="$(uname -m)"
     case "$(uname -s)" in
       Linux)
-        if [ -w /dev/kvm ]; then
+        # KVM only works when host and guest architectures match
+        if [ -w /dev/kvm ] && [ "$HOST_ARCH" = "\(archBin)" ]; then
           ACCEL="kvm"
         else
           ACCEL="tcg,tb-size=256"
@@ -172,7 +174,6 @@ function launchScript(
       Darwin)
         # macOS: HVF only works natively (x86 on Intel, ARM on Apple Silicon)
         # Fall back to TCG for cross-architecture emulation
-        HOST_ARCH="$(uname -m)"
         if [ "$HOST_ARCH" = "x86_64" ] && [ "\(archBin)" = "x86_64" ]; then
           ACCEL="hvf"
         elif [ "$HOST_ARCH" = "arm64" ] && [ "\(archBin)" = "aarch64" ]; then

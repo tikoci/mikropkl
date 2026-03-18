@@ -67,6 +67,7 @@ jobs:
   # Native-arch machines use KVM when available; cross-arch uses TCG.
   test:
     needs: build
+    name: "test (${{ matrix.runner-arch }})"
     strategy:
       matrix:
         include:
@@ -81,7 +82,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
 
     env:
-      HEALTH_PORT: "9180"
+      HEALTH_PORT_BASE: "9180"
 
     steps:
       - name: Checkout repository
@@ -196,7 +197,8 @@ jobs:
       - name: "Boot and test all QEMU machines"
         run: |
           RUNNER_ARCH="${{ matrix.runner-arch }}"
-          PORT="$HEALTH_PORT"
+          PORT_BASE=${{ env.HEALTH_PORT_BASE }}
+          PORT_OFFSET=0
           FAILED=0
           PASSED=0
 
@@ -228,9 +230,13 @@ jobs:
               TIMEOUT_ATTEMPTS=30
             fi
 
+            # Unique port per machine to avoid TCP TIME_WAIT collisions
+            PORT=$((PORT_BASE + PORT_OFFSET))
+            PORT_OFFSET=$((PORT_OFFSET + 1))
+
             echo "  Config: arch=$VM_ARCH mem=${VM_MEM}M cpus=$VM_CPUS disks=$VM_DISKS"
             echo "  Runner: $RUNNER_ARCH, KVM=$KVM_AVAIL → expected accel=$EXPECTED_ACCEL"
-            echo "  Timeout: $((TIMEOUT_ATTEMPTS * 10))s"
+            echo "  Port: $PORT, Timeout: $((TIMEOUT_ATTEMPTS * 10))s"
 
             # ── Start via qemu.sh ──
             sh "$UTM_DIR/qemu.sh" --background --port "$PORT"
