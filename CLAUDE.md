@@ -360,6 +360,31 @@ QEMU's `-kernel` flag (Linux boot protocol) does not work for RouterOS CHR:
 
 See `Lab/x86-direct-kernel/NOTES.md` for full analysis.
 
+### qemu.sh background mode and PID tracking
+
+`qemu.sh --background` uses `nohup sh -c "exec $CMD"` to launch QEMU.  The `exec`
+is critical — without it, `$!` captures the PID of the `sh -c` wrapper, not the
+actual QEMU process.  Consequences of missing `exec`:
+
+- `kill "$PID"` only kills the shell wrapper; QEMU becomes orphaned
+- CPU/state diagnostics show the idle wrapper (0% CPU), not QEMU
+- On Ubuntu (dash), `sh -c` does NOT forward SIGTERM to children
+- Orphaned QEMU processes accumulate across sequential test runs, consuming
+  memory and potentially causing resource contention for subsequent VMs
+
+### Cross-architecture TCG: x86_64 on aarch64 runner
+
+Running `qemu-system-x86_64` via TCG on an aarch64 host is significantly slower
+than native-architecture TCG.  Known issues:
+
+- `chr.x86_64.qemu` has consistently failed to boot on the aarch64 runner
+  (even with 300s timeout), while `rose.chr.x86_64.qemu` boots in 25-40s
+- The only config difference is drive count (1 vs 5 drives)
+- Root cause under investigation — may be QEMU bug, resource contention from
+  orphaned processes, or SeaBIOS behavior under cross-arch TCG
+- Serial console diagnostics (`socat` to the serial socket) added to CI to
+  capture where the boot hangs
+
 ## Common Pitfalls
 
 - **Running `pkl eval` without `CHR_VERSION` env**: defaults to "stable" channel.

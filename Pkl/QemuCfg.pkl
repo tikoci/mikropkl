@@ -283,7 +283,7 @@ function launchScript(
 
   echo "Starting \(vmName) (port $PORT, accel=$ACCEL)..."
   if [ "$BACKGROUND" = "1" ]; then
-    nohup sh -c "$CMD" >/tmp/qemu-\(vmName).log 2>&1 &
+    nohup sh -c "exec $CMD" >/tmp/qemu-\(vmName).log 2>&1 &
     echo $! > /tmp/qemu-\(vmName).pid
     echo "QEMU PID=$! — log: /tmp/qemu-\(vmName).log"
     echo "Serial: socat - UNIX-CONNECT:$SERIAL_SOCK"

@@ -99,7 +99,7 @@ jobs:
       - name: Install QEMU (both architectures)
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y qemu-system-x86 qemu-system-arm qemu-efi-aarch64 jq python3
+          sudo apt-get install -y qemu-system-x86 qemu-system-arm qemu-efi-aarch64 jq python3 socat
 
       - name: Install Apple pkl
         run: |
@@ -261,8 +261,18 @@ jobs:
               continue
             fi
 
+            # ── Resolve actual QEMU PID ──
+            # With exec fix, PID IS the QEMU process. Without exec, PID is the
+            # sh -c wrapper and actual QEMU is a child. Resolve the real PID.
+            QEMU_PID="$PID"
+            CHILD_PID=$(pgrep -P "$PID" 2>/dev/null | head -1)
+            if [ -n "$CHILD_PID" ]; then
+              echo "  ⚠ PID $PID is wrapper (sh -c), actual QEMU is child PID $CHILD_PID"
+              QEMU_PID="$CHILD_PID"
+            fi
+
             # ── Verify QEMU process command line ──
-            CMDLINE=$(cat /proc/$PID/cmdline | tr '\0' ' ')
+            CMDLINE=$(cat /proc/$QEMU_PID/cmdline 2>/dev/null | tr '\0' ' ' || cat /proc/$PID/cmdline | tr '\0' ' ')
 
             # Correct binary
             EXPECTED_BIN="qemu-system-$([ "$VM_ARCH" = "aarch64" ] && echo aarch64 || echo x86_64)"
@@ -301,7 +311,7 @@ jobs:
             POLL=5
             for i in $(seq 1 "$TIMEOUT_ATTEMPTS"); do
               # Bail early if QEMU process died
-              if ! kill -0 "$PID" 2>/dev/null; then
+              if ! kill -0 "$QEMU_PID" 2>/dev/null; then
                 echo "::error::$VMNAME: QEMU process died during boot"
                 break
               fi
@@ -310,9 +320,9 @@ jobs:
                 BOOTED=1
                 break
               fi
-              STATE=$(awk '{print $3}' /proc/$PID/stat 2>/dev/null || echo "?")
-              CPU=$(ps -p "$PID" -o %cpu= 2>/dev/null || echo "?")
-              echo "  Attempt $i/$TIMEOUT_ATTEMPTS: not ready (pid=$PID state=$STATE cpu=${CPU}%) — waiting ${POLL}s"
+              STATE=$(awk '{print $3}' /proc/$QEMU_PID/stat 2>/dev/null || echo "?")
+              CPU=$(ps -p "$QEMU_PID" -o %cpu= 2>/dev/null || echo "?")
+              echo "  Attempt $i/$TIMEOUT_ATTEMPTS: not ready (qemu_pid=$QEMU_PID state=$STATE cpu=${CPU}%) — waiting ${POLL}s"
               sleep "$POLL"
             done
 
@@ -320,11 +330,25 @@ jobs:
               echo "::error::$VMNAME: boot timeout after $((TIMEOUT_ATTEMPTS * POLL))s"
               echo "--- QEMU log ---"
               cat "/tmp/qemu-${VMNAME}.log" 2>/dev/null | tail -20 || echo "(empty)"
-              echo "--- Process info ---"
-              ps -p "$PID" -o pid,stat,%cpu,%mem,time,args 2>/dev/null || echo "(process ended)"
+              echo "--- Process info (QEMU pid=$QEMU_PID, wrapper pid=$PID) ---"
+              ps -p "$QEMU_PID" -o pid,stat,%cpu,%mem,time,args 2>/dev/null || echo "(QEMU process ended)"
+              if [ "$QEMU_PID" != "$PID" ]; then
+                ps -p "$PID" -o pid,stat,%cpu,%mem,time,args 2>/dev/null || true
+              fi
               echo "--- Listening ports ---"
               ss -tlnp 2>/dev/null | grep -E "$PORT|State" || echo "(port $PORT not listening)"
-              kill "$PID" 2>/dev/null || true
+              echo "--- Serial console (last 30 lines) ---"
+              SERIAL_SOCK="/tmp/qemu-${VMNAME}-serial.sock"
+              if [ -S "$SERIAL_SOCK" ]; then
+                timeout 2 socat -u UNIX-CONNECT:"$SERIAL_SOCK" STDOUT 2>/dev/null | tail -30 || echo "(no serial output)"
+              else
+                echo "(serial socket not found)"
+              fi
+              echo "--- All QEMU processes ---"
+              ps aux 2>/dev/null | grep -E "qemu-system" | grep -v grep || echo "(none)"
+              # Kill QEMU process and wrapper (exec fix makes these the same PID)
+              kill "$QEMU_PID" 2>/dev/null || true
+              [ "$QEMU_PID" != "$PID" ] && kill "$PID" 2>/dev/null || true
               sleep 2
               FAILED=$((FAILED + 1))
               echo "::endgroup::"
@@ -365,7 +389,8 @@ jobs:
             fi
 
             # ── Stop ──
-            kill "$PID" 2>/dev/null || true
+            kill "$QEMU_PID" 2>/dev/null || true
+            [ "$QEMU_PID" != "$PID" ] && kill "$PID" 2>/dev/null || true
             sleep 2
             rm -f "$PID_FILE"
 
