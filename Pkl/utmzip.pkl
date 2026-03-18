@@ -22,6 +22,14 @@ additionalDisks : List<DataSize>
 
 notes : String = UTM.defaultNotes
 
+/// Enable libvirt.xml output (QEMU backend only).
+/// Set via env `LIBVIRT_OUTPUT=true` in templates; defaults to false.
+libvirtOutput : Boolean = false
+
+/// Enable qemu.cfg + qemu.sh output (QEMU backend only).
+/// Set via env `QEMU_OUTPUT=true` in templates; defaults to true.
+qemuOutput : Boolean = true
+
 logoSvg : SVG.Icon = new SVG.Pkl {} 
 
 configPlist : UTM.Config = new {
@@ -114,9 +122,9 @@ output {
       }
     }
 
-    // libvirt XML domain definition (QEMU backend only)
+    // libvirt XML domain definition (QEMU backend only, when libvirtOutput is enabled)
     // Allows the same disk images to be used with `virsh define libvirt.xml`
-    when (backend == "QEMU") {
+    when (backend == "QEMU" && libvirtOutput) {
       ["\(name).utm/libvirt.xml"] {
         text = Libvirt.domain(
           name,
@@ -131,9 +139,9 @@ output {
       }
     }
 
-    // QEMU --readconfig ini file (QEMU backend only)
+    // QEMU --readconfig ini file (QEMU backend only, when qemuOutput is enabled)
     // Self-contained QEMU launch config — no XML parsing or libvirt needed
-    when (backend == "QEMU") {
+    when (backend == "QEMU" && qemuOutput) {
       ["\(name).utm/qemu.cfg"] {
         text = QemuCfg.config(
           name,

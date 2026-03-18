@@ -61,6 +61,8 @@ jobs:
 
       - name: Build machine bundles (make)
         run: make CHR_VERSION=${{ steps.resolve-version.outputs.version }}
+        env:
+          LIBVIRT_OUTPUT: "true"
 
       - name: List QEMU machines with libvirt.xml
         id: list-machines

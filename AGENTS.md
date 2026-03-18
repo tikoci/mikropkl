@@ -156,8 +156,10 @@ chr_install.sh stop chr.x86_64.qemu.7.22        # stop running instance
 ```
 
 **Storage convention:** `~/.mikropkl/<machine-name>/` with:
-- `config.plist` (metadata, from UTM bundle)
+- `config.pkl` (source of truth, from UTM bundle)
+- `config.plist` (UTM VM configuration, from UTM bundle)
 - `qemu.cfg` (launch config, from UTM bundle)
+- `qemu.sh` (launch script, from UTM bundle)
 - `Data/` (disk images)
 - `run.pid` (PID of running QEMU process)
 

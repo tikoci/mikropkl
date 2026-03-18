@@ -44,3 +44,7 @@ chrVersion : CHR.RouterOSVersion = new CHR.RouterOSVersion {
     .replaceAll("x86_64","x86")
     .replaceAll("aarch64","arm64")
 }
+
+// output control — override via env vars LIBVIRT_OUTPUT / QEMU_OUTPUT
+libvirtOutput = (read?("env:LIBVIRT_OUTPUT") ?? "false") == "true"
+qemuOutput = (read?("env:QEMU_OUTPUT") ?? "true") == "true"
