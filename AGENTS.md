@@ -87,8 +87,9 @@ The pkl module hardcodes `Hardware = "virtio-net-pci"` in the Network config.
 | Ubuntu x86 runner | `/usr/share/AAVMF/AAVMF_CODE.fd` | `AAVMF_VARS.fd` | 64 MiB each | Preferred on CI |
 | Ubuntu ARM runner | `/usr/share/AAVMF/AAVMF_CODE.fd` | `AAVMF_VARS.fd` | 64 MiB each | **Symlink** — use `stat -Lc%s`; avoid `QEMU_EFI.fd` (2 MiB) |
 
-**Critical**: Both pflash units (code + vars) must be identical size.  Use `truncate -s`
-to pad/trim the vars file to match the code ROM.  On `ubuntu-24.04-arm`, `AAVMF_CODE.fd`
+**Critical**: Both pflash units (code + vars) must be identical size.  Use
+`dd if=/dev/zero of=VARS bs=1 count=0 seek=SIZE` to pad/trim (`truncate` is not available
+everywhere; `qemu.sh` uses `dd` for portability).  On `ubuntu-24.04-arm`, `AAVMF_CODE.fd`
 is a **symlink** (to `AAVMF_CODE.no-secboot.fd`).  Always use `stat -Lc%s` (with `-L`)
 to get the real file size — without `-L`, `stat` returns the symlink path length (~24 bytes).
 
@@ -112,6 +113,15 @@ Implemented in `Pkl/QemuCfg.pkl`.  Generates `qemu.cfg` (QEMU --readconfig ini) 
   display/serial config.  These are handled by `qemu.sh`.
 - `qemu.cfg` uses `/QEMU_DATA_PATH/` sentinel (like libvirt's `/LIBVIRT_DATA_PATH/`)
   replaced by `make qemu-fixpaths`; `qemu.sh` resolves paths at runtime automatically.
+
+**Bug fix — background mode temp file race (b279532):**
+The initial implementation used `mktemp` for the resolved qemu.cfg copy and set an
+unconditional `EXIT` trap to delete it.  In `--background` mode, the parent shell exits
+after `nohup ... &`, the trap fires, and QEMU (still starting up) finds the config file
+deleted.  Fix: use deterministic paths (`/tmp/qemu-<name>.cfg`, `/tmp/qemu-<name>-vars.fd`)
+and only set the cleanup trap in foreground mode.  **Pattern for agents:** when a shell
+script creates temp files consumed by a backgrounded child process, either use deterministic
+paths without cleanup traps, or use `mktemp` but skip the trap in background mode.
 
 ### 2. macOS CI Workflow for UTM Validation (Priority: High)
 
@@ -205,6 +215,15 @@ Libvirt's RelaxNG schema requires absolute file paths in `<source file="">`.  Th
 regex pattern is `(/|[a-zA-Z]:\\).+` — relative paths fail with a misleading error.
 The sentinel is a valid absolute path that `make libvirt-fixpaths` replaces at build
 time.
+
+### Why deterministic temp file paths in qemu.sh (not mktemp)
+
+`mktemp` + `trap ... EXIT` is the standard pattern for temp file cleanup, but it breaks
+when the script backgrounds a child process that needs the temp file.  The `EXIT` trap
+fires when the parent shell exits — before the background child (QEMU) reads the file.
+Using deterministic paths (`/tmp/qemu-<vmname>.cfg`) with no cleanup trap in background
+mode avoids the race.  The trade-off is temp file leakage, but deterministic paths mean
+repeated runs overwrite rather than accumulate, and `/tmp` is cleaned on reboot.
 
 ### Why SLIRP networking (not bridge/tap)
 
