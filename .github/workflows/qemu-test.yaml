@@ -38,8 +38,10 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-utils wget make unzip
+          echo "::group::Install dependencies"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends qemu-utils wget make unzip
+          echo "::endgroup::"
 
       - name: Install Apple pkl
         run: |
@@ -98,8 +100,10 @@ jobs:
 
       - name: Install QEMU (both architectures)
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-system-x86 qemu-system-arm qemu-efi-aarch64 jq python3 socat
+          echo "::group::Install QEMU and tools"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends qemu-system-x86 qemu-system-arm qemu-efi-aarch64 jq python3 socat
+          echo "::endgroup::"
 
       - name: Log QEMU versions
         run: |
