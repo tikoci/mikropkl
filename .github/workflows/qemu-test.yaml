@@ -1,12 +1,13 @@
 name: "Test: QEMU Direct Boot"
 
-# Builds all QEMU manifests and boots them via qemu.sh on both x86_64 and aarch64 runners.
-# Each runner tests ALL machines — native-arch machines use KVM (if available),
-# cross-arch machines use TCG.  This validates the full pipeline:
+# Builds all QEMU manifests and boots them via qemu.sh on x86_64 and aarch64 runners.
+# Each runner boots ALL machines (native via KVM/TCG, cross-arch via TCG).
+# qemu.cfg ↔ config.pkl consistency is checked for ALL machines on both runners.
+# This validates the full pipeline:
 #   pkl → config.plist → qemu.cfg → qemu.sh → running QEMU process → REST API
 #
 # Verification per machine:
-#   1. qemu.cfg ↔ config.plist consistency (machine type, memory, CPUs, drives)
+#   1. qemu.cfg ↔ config.pkl consistency (machine type, memory, CPUs, drives)
 #   2. QEMU process flags (correct binary, accelerator, pflash, port forwarding)
 #   3. REST API endpoints + check-installation (x86 only)
 
@@ -63,8 +64,9 @@ jobs:
           retention-days: 1
 
   # ── Phase 2: boot-test — one job per runner architecture ──────────────────
-  # Each job tests ALL QEMU machines (native + cross-architecture).
-  # Native-arch machines use KVM when available; cross-arch uses TCG.
+  # Each runner boots and tests ALL machines: native-arch via KVM (when available)
+  # or TCG, cross-arch via TCG.  Both runners validate qemu.cfg ↔ config.pkl
+  # consistency and boot every machine.
   test:
     needs: build
     name: "test (${{ matrix.runner-arch }})"
@@ -215,19 +217,18 @@ jobs:
             VM_DISKS=$(pkl eval -x 'Drive.toList().length' "$CFG_PKL")
 
             # ── Determine expected accelerator ──
+            # KVM only when host and guest architectures match
             if [ "$VM_ARCH" = "$RUNNER_ARCH" ] && [ "$KVM_AVAIL" = "1" ]; then
               EXPECTED_ACCEL="kvm"
             else
               EXPECTED_ACCEL="tcg"
             fi
 
-            # ── Boot timeout: KVM=120s, native-TCG=180s, cross-TCG=300s ──
+            # ── Boot timeout (poll every 5s): KVM=30s, TCG=60s ──
             if [ "$EXPECTED_ACCEL" = "kvm" ]; then
-              TIMEOUT_ATTEMPTS=12
-            elif [ "$VM_ARCH" = "$RUNNER_ARCH" ]; then
-              TIMEOUT_ATTEMPTS=18
+              TIMEOUT_ATTEMPTS=6     # 30s
             else
-              TIMEOUT_ATTEMPTS=30
+              TIMEOUT_ATTEMPTS=12    # 60s
             fi
 
             # Unique port per machine to avoid TCP TIME_WAIT collisions
@@ -236,11 +237,13 @@ jobs:
 
             echo "  Config: arch=$VM_ARCH mem=${VM_MEM}M cpus=$VM_CPUS disks=$VM_DISKS"
             echo "  Runner: $RUNNER_ARCH, KVM=$KVM_AVAIL → expected accel=$EXPECTED_ACCEL"
-            echo "  Port: $PORT, Timeout: $((TIMEOUT_ATTEMPTS * 10))s"
+            echo "  Port: $PORT, Timeout: $((TIMEOUT_ATTEMPTS * 5))s"
 
-            # ── Start via qemu.sh ──
+            # ── Clean stale files and start via qemu.sh ──
+            rm -f "/tmp/qemu-${VMNAME}.pid" "/tmp/qemu-${VMNAME}.log" \
+                  "/tmp/qemu-${VMNAME}-serial.sock" "/tmp/qemu-${VMNAME}-vars.fd"
             sh "$UTM_DIR/qemu.sh" --background --port "$PORT"
-            sleep 10
+            sleep 5
 
             PID_FILE="/tmp/qemu-${VMNAME}.pid"
             if [ ! -f "$PID_FILE" ]; then
@@ -293,22 +296,36 @@ jobs:
               echo "  ::error::$VMNAME: port forwarding not found in command line"
             fi
 
-            # ── Wait for RouterOS HTTP ──
+            # ── Wait for RouterOS HTTP (poll every 5s) ──
             BOOTED=0
+            POLL=5
             for i in $(seq 1 "$TIMEOUT_ATTEMPTS"); do
-              if curl -sS -m 5 --fail "http://localhost:${PORT}/" > /dev/null 2>&1; then
-                echo "  ✓ RouterOS HTTP up after $((i * 10))s"
+              # Bail early if QEMU process died
+              if ! kill -0 "$PID" 2>/dev/null; then
+                echo "::error::$VMNAME: QEMU process died during boot"
+                break
+              fi
+              if curl -sS -m 3 --fail "http://localhost:${PORT}/" > /dev/null 2>&1; then
+                echo "  ✓ RouterOS HTTP up after $((i * POLL))s"
                 BOOTED=1
                 break
               fi
-              echo "  Attempt $i/$TIMEOUT_ATTEMPTS: not ready, waiting 10s..."
-              sleep 10
+              STATE=$(awk '{print $3}' /proc/$PID/stat 2>/dev/null || echo "?")
+              CPU=$(ps -p "$PID" -o %cpu= 2>/dev/null || echo "?")
+              echo "  Attempt $i/$TIMEOUT_ATTEMPTS: not ready (pid=$PID state=$STATE cpu=${CPU}%) — waiting ${POLL}s"
+              sleep "$POLL"
             done
 
             if [ "$BOOTED" = "0" ]; then
-              echo "::error::$VMNAME: boot timeout after $((TIMEOUT_ATTEMPTS * 10))s"
-              cat "/tmp/qemu-${VMNAME}.log" 2>/dev/null | tail -30
+              echo "::error::$VMNAME: boot timeout after $((TIMEOUT_ATTEMPTS * POLL))s"
+              echo "--- QEMU log ---"
+              cat "/tmp/qemu-${VMNAME}.log" 2>/dev/null | tail -20 || echo "(empty)"
+              echo "--- Process info ---"
+              ps -p "$PID" -o pid,stat,%cpu,%mem,time,args 2>/dev/null || echo "(process ended)"
+              echo "--- Listening ports ---"
+              ss -tlnp 2>/dev/null | grep -E "$PORT|State" || echo "(port $PORT not listening)"
               kill "$PID" 2>/dev/null || true
+              sleep 2
               FAILED=$((FAILED + 1))
               echo "::endgroup::"
               continue

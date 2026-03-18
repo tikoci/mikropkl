@@ -106,8 +106,10 @@ Implemented in `Pkl/QemuCfg.pkl`.  Generates `qemu.cfg` (QEMU --readconfig ini) 
 - `qemu.sh` handles: UEFI pflash (aarch64), KVM/HVF/TCG detection, networking
   with port forwarding, display/serial config, `--background`/`--dry-run` modes
 - Makefile targets: `qemu-list`, `qemu-chmod`, `qemu-run`, `qemu-stop`
-- `qemu-test.yaml` CI workflow boots all machines on both x86_64 and aarch64 runners,
-  verifies qemu.cfg ↔ config.plist consistency, checks QEMU process flags, and runs REST API checks
+- `qemu-test.yaml` CI workflow boots all machines on both x86_64 and aarch64 runners
+  (including cross-arch via TCG), verifies qemu.cfg ↔ config.pkl consistency, checks
+  QEMU process flags, and runs REST API checks.  Boot diagnostics log process state
+  and CPU usage during the wait loop.
 
 **Limitations documented in generated files:**
 - QEMU `--readconfig` cannot express: pflash drives, `-accel`, `-netdev user,hostfwd`,
@@ -230,6 +232,15 @@ fires when the parent shell exits — before the background child (QEMU) reads t
 Using deterministic paths (`/tmp/qemu-<vmname>.cfg`) with no cleanup trap in background
 mode avoids the race.  The trade-off is temp file leakage, but deterministic paths mean
 repeated runs overwrite rather than accumulate, and `/tmp` is cleaned on reboot.
+
+### Why KVM requires host/guest architecture match in qemu.sh
+
+`/dev/kvm` may be present and writable on a Linux host even when the QEMU guest is a
+different architecture.  Running `qemu-system-aarch64 -accel kvm` on an x86_64 host
+(or vice versa) crashes immediately.  `qemu.sh` gates KVM usage on
+`[ "$HOST_ARCH" = "<guest-arch>" ]` so cross-architecture guests always fall back to
+TCG.  Cross-arch TCG emulation is fast enough for CI — x86_64 CHR boots on an ARM64
+runner in ~40s, aarch64 CHR boots on an x86_64 runner in ~20s.
 
 ### Why SLIRP networking (not bridge/tap)
 

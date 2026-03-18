@@ -437,6 +437,33 @@ make qemu-list
 | `libvirt-test.yaml` | manual dispatch | Boots all QEMU machines in CI and checks installation |
 | `qemu-test.yaml` | manual dispatch | Boots each QEMU machine via qemu.sh and runs REST API checks |
 
+### qemu-test.yaml — How the CI Works
+
+Similar structure to `libvirt-test.yaml`: build job + 2 test jobs (x86_64 + aarch64).
+
+#### Key differences from libvirt-test.yaml
+- Uses `qemu.sh --background --port $PORT` instead of raw QEMU commands
+- qemu.cfg ↔ config.pkl consistency check (pkl PCF is source of truth)
+- Cross-arch TCG: every runner boots ALL machines (not just its native arch)
+- **KVM cross-arch guard**: qemu.sh checks `HOST_ARCH` matches guest arch before
+  using KVM; cross-arch guests always fall back to TCG
+- Unique ports per machine (PORT_BASE + offset) to avoid TCP TIME_WAIT collisions
+
+#### Boot diagnostics
+- Each poll attempt logs process state and CPU% (`/proc/$PID/stat`, `ps -o %cpu`)
+- On timeout: dumps QEMU stderr log, `ps` process info, and `ss` listening ports
+- Early exit if QEMU process dies during boot wait
+
+#### Timeouts
+- KVM: 30s (6 × 5s polls)
+- TCG (native or cross-arch): 60s (12 × 5s polls)
+
+#### Expected boot times (from CI observations)
+- KVM native: ~20s
+- TCG native: ~20–25s
+- TCG cross-arch (x86 on ARM): ~40s
+- TCG cross-arch (ARM on x86): ~20s
+
 ## Development Toolchain (macOS Intel)
 
 ### Required
