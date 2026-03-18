@@ -1,7 +1,8 @@
 name: "Test: QEMU Direct Boot"
 
 # Builds all QEMU manifests and boots them via qemu.sh on x86_64 and aarch64 runners.
-# Each runner boots ALL machines (native via KVM/TCG, cross-arch via TCG).
+# x86_64 runner tests only x86_64 machines (end-user scenario: no ARM packages installed).
+# aarch64 runner tests all machines (native + cross-arch x86_64 via TCG).
 # qemu.cfg ↔ config.pkl consistency is checked for ALL machines on both runners.
 # This validates the full pipeline:
 #   pkl → config.plist → qemu.cfg → qemu.sh → running QEMU process → REST API
@@ -96,10 +97,16 @@ jobs:
           name: Machines
           path: ./Machines
 
-      - name: Install QEMU (both architectures)
+      - name: Install QEMU packages
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y qemu-system-x86 qemu-system-arm qemu-efi-aarch64 jq python3 socat
+          if [ "${{ matrix.runner-arch }}" = "x86_64" ]; then
+            # End users on x86_64 would only have x86 packages — don't install ARM
+            sudo apt-get install -y qemu-system-x86 jq python3 socat
+          else
+            # aarch64 runner: native ARM + x86 for cross-arch testing
+            sudo apt-get install -y qemu-system-arm qemu-efi-aarch64 qemu-system-x86 jq python3 socat
+          fi
 
       - name: Install Apple pkl
         run: |
@@ -216,6 +223,15 @@ jobs:
             VM_CPUS=$(pkl eval -x 'if (System.CPUCount == 0) 1 else System.CPUCount' "$CFG_PKL")
             VM_DISKS=$(pkl eval -x 'Drive.toList().length' "$CFG_PKL")
 
+            # ── Skip non-native machines on x86_64 runner ──
+            # x86_64 end users wouldn't have ARM packages; test only x86_64 machines.
+            # aarch64 runner tests all machines (native + cross-arch via TCG).
+            if [ "$RUNNER_ARCH" = "x86_64" ] && [ "$VM_ARCH" != "x86_64" ]; then
+              echo "  ⊘ Skipping $VMNAME ($VM_ARCH) on $RUNNER_ARCH runner"
+              echo "::endgroup::"
+              continue
+            fi
+
             # ── Determine expected accelerator ──
             # KVM only when host and guest architectures match
             if [ "$VM_ARCH" = "$RUNNER_ARCH" ] && [ "$KVM_AVAIL" = "1" ]; then
@@ -224,9 +240,11 @@ jobs:
               EXPECTED_ACCEL="tcg"
             fi
 
-            # ── Boot timeout (poll every 5s): KVM=30s, TCG=60s ──
+            # ── Boot timeout (poll every 5s): KVM=30s, native TCG=60s, cross-arch TCG=120s ──
             if [ "$EXPECTED_ACCEL" = "kvm" ]; then
               TIMEOUT_ATTEMPTS=6     # 30s
+            elif [ "$VM_ARCH" != "$RUNNER_ARCH" ]; then
+              TIMEOUT_ATTEMPTS=24    # 120s (cross-arch TCG is significantly slower)
             else
               TIMEOUT_ATTEMPTS=12    # 60s
             fi
