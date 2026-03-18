@@ -38,12 +38,12 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y qemu-utils wget make unzip
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-utils wget make unzip
 
       - name: Install Apple pkl
         run: |
-          curl -L -o pkl "https://github.com/apple/pkl/releases/download/${{ inputs.pklversion }}/pkl-linux-amd64"
+          curl -fsSL -o pkl "https://github.com/apple/pkl/releases/download/${{ inputs.pklversion }}/pkl-linux-amd64"
           chmod +x pkl && sudo cp pkl /usr/local/bin/pkl
 
       - name: Resolve RouterOS version
@@ -98,12 +98,12 @@ jobs:
 
       - name: Install QEMU (both architectures)
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y qemu-system-x86 qemu-system-arm qemu-efi-aarch64 jq python3 socat
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 qemu-system-arm qemu-efi-aarch64 jq python3 socat
 
       - name: Install Apple pkl
         run: |
-          curl -L -o pkl "https://github.com/apple/pkl/releases/download/${{ inputs.pklversion }}/pkl-linux-${{ matrix.pkl-arch }}"
+          curl -fsSL -o pkl "https://github.com/apple/pkl/releases/download/${{ inputs.pklversion }}/pkl-linux-${{ matrix.pkl-arch }}"
           chmod +x pkl && sudo cp pkl /usr/local/bin/pkl
 
       - name: Enable KVM
@@ -224,11 +224,11 @@ jobs:
               EXPECTED_ACCEL="tcg"
             fi
 
-            # ── Boot timeout (poll every 5s): KVM=30s, native TCG=60s, cross-arch TCG=120s ──
+            # ── Boot timeout (poll every 5s): KVM=30s, native TCG=60s, cross-arch TCG=300s ──
             if [ "$EXPECTED_ACCEL" = "kvm" ]; then
               TIMEOUT_ATTEMPTS=6     # 30s
             elif [ "$VM_ARCH" != "$RUNNER_ARCH" ]; then
-              TIMEOUT_ATTEMPTS=24    # 120s (cross-arch TCG is significantly slower)
+              TIMEOUT_ATTEMPTS=60    # 300s (cross-arch x86 TCG on ARM is very slow)
             else
               TIMEOUT_ATTEMPTS=12    # 60s
             fi
@@ -242,14 +242,31 @@ jobs:
             echo "  Port: $PORT, Timeout: $((TIMEOUT_ATTEMPTS * 5))s"
 
             # ── Clean stale files and start via qemu.sh ──
+            SERIAL_LOG="/tmp/qemu-${VMNAME}-serial.log"
             rm -f "/tmp/qemu-${VMNAME}.pid" "/tmp/qemu-${VMNAME}.log" \
-                  "/tmp/qemu-${VMNAME}-serial.sock" "/tmp/qemu-${VMNAME}-vars.fd"
+                  "/tmp/qemu-${VMNAME}-serial.sock" "/tmp/qemu-${VMNAME}-vars.fd" \
+                  "$SERIAL_LOG"
             sh "$UTM_DIR/qemu.sh" --background --port "$PORT"
-            sleep 5
+            sleep 2
+
+            # ── Start serial capture immediately (socat in background) ──
+            # The serial chardev socket doesn't buffer historical output, so we
+            # must connect from the start to see SeaBIOS/UEFI and kernel messages.
+            SERIAL_SOCK="/tmp/qemu-${VMNAME}-serial.sock"
+            SOCAT_PID=""
+            if [ -S "$SERIAL_SOCK" ]; then
+              socat -u UNIX-CONNECT:"$SERIAL_SOCK" "CREATE:$SERIAL_LOG" &
+              SOCAT_PID=$!
+              echo "  Serial capture PID=$SOCAT_PID → $SERIAL_LOG"
+            else
+              echo "  ⚠ Serial socket not yet available for capture"
+            fi
+            sleep 3
 
             PID_FILE="/tmp/qemu-${VMNAME}.pid"
             if [ ! -f "$PID_FILE" ]; then
               echo "::error::$VMNAME: no PID file found"
+              [ -n "$SOCAT_PID" ] && kill "$SOCAT_PID" 2>/dev/null || true
               FAILED=$((FAILED + 1))
               echo "::endgroup::"
               continue
@@ -258,6 +275,7 @@ jobs:
             if ! kill -0 "$PID" 2>/dev/null; then
               echo "::error::$VMNAME: QEMU process exited immediately"
               cat "/tmp/qemu-${VMNAME}.log" 2>/dev/null | tail -30
+              [ -n "$SOCAT_PID" ] && kill "$SOCAT_PID" 2>/dev/null || true
               FAILED=$((FAILED + 1))
               echo "::endgroup::"
               continue
@@ -339,12 +357,16 @@ jobs:
               fi
               echo "--- Listening ports ---"
               ss -tlnp 2>/dev/null | grep -E "$PORT|State" || echo "(port $PORT not listening)"
-              echo "--- Serial console (last 30 lines) ---"
-              SERIAL_SOCK="/tmp/qemu-${VMNAME}-serial.sock"
-              if [ -S "$SERIAL_SOCK" ]; then
-                timeout 2 socat -u UNIX-CONNECT:"$SERIAL_SOCK" STDOUT 2>/dev/null | tail -30 || echo "(no serial output)"
+              echo "--- Serial console (captured from boot start, last 50 lines) ---"
+              if [ -n "$SOCAT_PID" ]; then
+                kill "$SOCAT_PID" 2>/dev/null || true
+                wait "$SOCAT_PID" 2>/dev/null || true
+              fi
+              if [ -s "$SERIAL_LOG" ]; then
+                wc -c < "$SERIAL_LOG" | xargs -I{} echo "  (serial log: {} bytes)"
+                tail -50 "$SERIAL_LOG"
               else
-                echo "(serial socket not found)"
+                echo "(no serial output captured — VM may not output to serial)"
               fi
               echo "--- All QEMU processes ---"
               ps aux 2>/dev/null | grep -E "qemu-system" | grep -v grep || echo "(none)"
@@ -391,6 +413,10 @@ jobs:
             fi
 
             # ── Stop ──
+            if [ -n "$SOCAT_PID" ]; then
+              kill "$SOCAT_PID" 2>/dev/null || true
+              wait "$SOCAT_PID" 2>/dev/null || true
+            fi
             kill "$QEMU_PID" 2>/dev/null || true
             [ "$QEMU_PID" != "$PID" ] && kill "$PID" 2>/dev/null || true
             sleep 2
@@ -417,4 +443,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: qemu-logs-${{ matrix.runner-arch }}
-          path: /tmp/qemu-*.log
+          path: |
+            /tmp/qemu-*.log
+            /tmp/qemu-*-serial.log

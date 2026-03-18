@@ -381,7 +381,7 @@ than native-architecture TCG.  Known issues:
   the VMs ARE actively booting (not in a boot loop or stuck).  High CPU is normal
   for TCG translating x86 instructions on ARM.
 - Boot times are highly variable depending on runner hardware: observed 25s to 100s+
-  for the same machine across different runs.  The workflow uses a 120s timeout.
+  for the same machine across different runs.  The workflow uses a 300s timeout.
 - The earlier `chr.x86_64.qemu` failures (0% CPU, 300s timeout) were caused by
   orphaned QEMU processes from the missing `exec` in `nohup sh -c "$CMD"`.  The
   CPU was measured on the `sh -c` wrapper, not the actual QEMU process.  With the
@@ -489,7 +489,7 @@ Similar structure to `libvirt-test.yaml`: build job + 2 test jobs (x86_64 + aarc
 #### Timeouts
 - KVM: 30s (6 × 5s polls)
 - TCG native: 60s (12 × 5s polls)
-- TCG cross-arch: 120s (24 × 5s polls) — x86_64 on aarch64 can take 60–100s
+- TCG cross-arch: 300s (60 × 5s polls) — x86_64 on aarch64 can take >120s
 
 #### Expected boot times (from CI observations)
 - KVM native: ~20s

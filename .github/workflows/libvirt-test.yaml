@@ -42,12 +42,12 @@ jobs:
         # qemu-utils provides qemu-img (needed by make phase2 for extra disks)
         # wget for image downloads, libxml2-utils for xmllint, jq for JSON output
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y qemu-utils wget libxml2-utils make unzip zip jq
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-utils wget libxml2-utils make unzip zip jq
 
       - name: Install Apple pkl
         run: |
-          curl -L -o pkl "https://github.com/apple/pkl/releases/download/${{ github.event.inputs.pklversion }}/pkl-linux-amd64"
+          curl -fsSL -o pkl "https://github.com/apple/pkl/releases/download/${{ github.event.inputs.pklversion }}/pkl-linux-amd64"
           chmod +x pkl
           ./pkl --version
           sudo cp ./pkl /usr/local/bin/pkl
@@ -114,13 +114,11 @@ jobs:
 
       - name: Install QEMU and XML tools
         run: |
-          sudo apt-get update -y
+          sudo apt-get update -qq
           if echo "${{ matrix.machine }}" | grep -q 'aarch64'; then
-            # qemu-system-arm: aarch64 emulator
-            # qemu-efi-aarch64: provides QEMU_EFI.fd UEFI firmware for virt machine
-            sudo apt-get install -y qemu-system-arm qemu-efi-aarch64 libxml2-utils
+            sudo apt-get install -y -qq qemu-system-arm qemu-efi-aarch64 libxml2-utils
           else
-            sudo apt-get install -y qemu-system-x86 libxml2-utils
+            sudo apt-get install -y -qq qemu-system-x86 libxml2-utils
           fi
 
       - name: Enable KVM

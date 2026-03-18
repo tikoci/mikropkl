@@ -53,13 +53,13 @@ pkl:
 
 # pattern rules run the show
 %.raw: %.raw.url
-	wget -O $@ `cat $<`
+	wget -q -O $@ `cat $<`
 %.img: %.img.zip.url
-	wget -O $@.zip `cat $<`
+	wget -q -O $@.zip `cat $<`
 	unzip -o $(subst .url,,$<) -d $(dir $@)
 	rm $(subst .url,,$<)
 %.qcow2: %.qcow2.zip.url
-	wget -O $@.zip `cat $<`
+	wget -q -O $@.zip `cat $<`
 	unzip -o $(subst .url,,$<) -d $(dir $@)
 	rm $(subst .url,,$<)
 %.qcow2: %.size
