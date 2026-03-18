@@ -79,7 +79,7 @@ LOCALCPFILE := $(wildcard ./$(PKL_OUTPUT_DIR)/*/Data/*.localcp)
 LOCALCPTARGETS := $(subst .localcp,,$(LOCALCPFILE))
 
 # links all targets together from found placeholders
-phase2: libvirt-fixpaths qemu-fixpaths qemu-chmod $(LOCALCPTARGETS) $(SIZETARGETS) $(URLTARGETS) $(ZIPIMGTARGETS)
+phase2: libvirt-fixpaths qemu-chmod $(LOCALCPTARGETS) $(SIZETARGETS) $(URLTARGETS) $(ZIPIMGTARGETS)
 	$(info ran build phase2)
 	$(info used deps: $?)
 
@@ -228,14 +228,10 @@ QEMU_SHFILES := $(wildcard ./$(PKL_OUTPUT_DIR)/*.utm/qemu.sh)
 qemu-list:
 	@for f in $(QEMU_CFGFILES); do echo $$f; done
 
-# Replace /QEMU_DATA_PATH placeholder in qemu.cfg with actual absolute Data directory path.
-# Run automatically by phase2 or manually at any time after pkl generates the files.
+# No-op: qemu.cfg now uses relative paths (./Data/...) and qemu.sh resolves them
+# by changing to its own directory before launching QEMU.
 qemu-fixpaths:
-	@for f in $(QEMU_CFGFILES); do \
-	  datadir=$$(cd "$$(dirname $$f)" && pwd)/Data; \
-	  perl -i -pe "s|/QEMU_DATA_PATH|$$datadir|g" $$f; \
-	  echo "qemu-fixpaths: $$f -> $$datadir"; \
-	done
+	@echo "qemu-fixpaths: no-op (qemu.cfg uses relative paths)"
 
 # Make all qemu.sh scripts executable
 qemu-chmod:

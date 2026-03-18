@@ -195,7 +195,7 @@ The Makefile runs in **two recursive phases**:
      - `*.img.zip.url` — URL to download from MikroTik
      - `*.size` — qcow2 disk size in MiB (for `qemu-img create`)
      - `*.localcp` — filename of a file to copy from `Files/`
-   - Also emits `qemu.cfg` + `qemu.sh` (QEMU machines only, enabled by default) with `/QEMU_DATA_PATH/` sentinel
+   - Also emits `qemu.cfg` + `qemu.sh` (QEMU machines only, enabled by default) with relative `./Data/` paths
    - Optionally emits `libvirt.xml` (QEMU machines only, disabled by default — enable with `LIBVIRT_OUTPUT=true`) with `/LIBVIRT_DATA_PATH/` sentinel
 
 2. **`make phase2`** → resolves placeholders:
@@ -203,7 +203,6 @@ The Makefile runs in **two recursive phases**:
    - `*.size` → `qemu-img create -f qcow2`
    - `*.localcp` → `cp` from `Files/`
    - `libvirt-fixpaths` → replaces `/LIBVIRT_DATA_PATH/` sentinel with real absolute paths
-   - `qemu-fixpaths` → replaces `/QEMU_DATA_PATH/` sentinel with real absolute paths
    - `qemu-chmod` → makes `qemu.sh` scripts executable
 
 Running `make` triggers `phase1` then recursively calls `make phase2`.
@@ -369,8 +368,9 @@ See `Lab/x86-direct-kernel/NOTES.md` for full analysis.
   `make clean` before builds if you need a pristine state.
 - **libvirt-fixpaths writes absolute paths**: If you move the `Machines/` directory,
   re-run `make libvirt-fixpaths` or re-run `make` from scratch.
-- **qemu-fixpaths writes absolute paths**: Same as libvirt-fixpaths but for `qemu.cfg`.
-  `qemu.sh` resolves paths at runtime so it doesn't need fixpaths.
+- **qemu.cfg uses relative paths**: Disk paths in `qemu.cfg` are relative (`./Data/...`).
+  `qemu.sh` changes to its own directory before launching QEMU so relative paths resolve
+  correctly.  Downloaded `.utm` ZIPs from GitHub Releases work without path fixups.
 - **macOS libvirt**: Not a supported testing configuration.  Use UTM for macOS.
 - **Apple backend machines**: Do NOT get a `libvirt.xml` or `qemu.cfg` — the
   `when (backend == "QEMU")` gate in `utmzip.pkl` prevents it.
@@ -398,8 +398,8 @@ pkl eval ./Manifests/*.pkl -m ./Machines
 # Fix libvirt paths after pkl runs (normally automatic in phase2)
 make libvirt-fixpaths
 
-# Fix qemu.cfg paths and make qemu.sh executable (normally automatic in phase2)
-make qemu-fixpaths qemu-chmod
+# Make qemu.sh executable (normally automatic in phase2)
+make qemu-chmod
 
 # Validate libvirt XML
 make libvirt-validate   # requires: brew install libvirt (macOS) or apt libvirt-clients (Linux)

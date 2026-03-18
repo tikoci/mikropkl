@@ -46,5 +46,6 @@ chrVersion : CHR.RouterOSVersion = new CHR.RouterOSVersion {
 }
 
 // output control — override via env vars LIBVIRT_OUTPUT / QEMU_OUTPUT
+// default is libvirtOutput = false and qemuOutput = true
 libvirtOutput = (read?("env:LIBVIRT_OUTPUT") ?? "false") == "true"
 qemuOutput = (read?("env:QEMU_OUTPUT") ?? "true") == "true"

@@ -105,23 +105,27 @@ Implemented in `Pkl/QemuCfg.pkl`.  Generates `qemu.cfg` (QEMU --readconfig ini) 
 - `qemu.cfg` covers: `[machine]`, `[memory]`, `[smp-opts]`, `[drive]`, `[device]`
 - `qemu.sh` handles: UEFI pflash (aarch64), KVM/HVF/TCG detection, networking
   with port forwarding, display/serial config, `--background`/`--dry-run` modes
-- Makefile targets: `qemu-list`, `qemu-fixpaths`, `qemu-chmod`, `qemu-run`, `qemu-stop`
-- `qemu-test.yaml` CI workflow boots each machine via `qemu.sh` and runs REST API checks
+- Makefile targets: `qemu-list`, `qemu-chmod`, `qemu-run`, `qemu-stop`
+- `qemu-test.yaml` CI workflow boots all machines on both x86_64 and aarch64 runners,
+  verifies qemu.cfg ↔ config.plist consistency, checks QEMU process flags, and runs REST API checks
 
 **Limitations documented in generated files:**
 - QEMU `--readconfig` cannot express: pflash drives, `-accel`, `-netdev user,hostfwd`,
   display/serial config.  These are handled by `qemu.sh`.
-- `qemu.cfg` uses `/QEMU_DATA_PATH/` sentinel (like libvirt's `/LIBVIRT_DATA_PATH/`)
-  replaced by `make qemu-fixpaths`; `qemu.sh` resolves paths at runtime automatically.
+- `qemu.cfg` uses relative paths (`./Data/...`).  `qemu.sh` changes directory to its
+  own location before launching QEMU so relative paths resolve correctly.  Downloaded
+  `.utm` ZIPs from GitHub Releases work without any path fixups.
 
 **Bug fix — background mode temp file race (b279532):**
 The initial implementation used `mktemp` for the resolved qemu.cfg copy and set an
 unconditional `EXIT` trap to delete it.  In `--background` mode, the parent shell exits
 after `nohup ... &`, the trap fires, and QEMU (still starting up) finds the config file
-deleted.  Fix: use deterministic paths (`/tmp/qemu-<name>.cfg`, `/tmp/qemu-<name>-vars.fd`)
-and only set the cleanup trap in foreground mode.  **Pattern for agents:** when a shell
-script creates temp files consumed by a backgrounded child process, either use deterministic
-paths without cleanup traps, or use `mktemp` but skip the trap in background mode.
+deleted.  Fix: use deterministic paths (`/tmp/qemu-<name>-vars.fd`) and only set the
+cleanup trap in foreground mode.  The later switch to relative paths in qemu.cfg eliminated
+the temp config copy entirely — only the UEFI vars copy (aarch64) still needs temp file
+handling.  **Pattern for agents:** when a shell script creates temp files consumed by a
+backgrounded child process, either use deterministic paths without cleanup traps, or use
+`mktemp` but skip the trap in background mode.
 
 ### 2. macOS CI Workflow for UTM Validation (Priority: High)
 

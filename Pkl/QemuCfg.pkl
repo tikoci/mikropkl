@@ -26,7 +26,7 @@ local function driveSections(idx: Int, imageName: String, architecture: UTM.Syst
     // aarch64: use if=none + explicit device to get virtio-blk-pci (not MMIO)
     """
     [drive "\(id)"]
-      file = "/QEMU_DATA_PATH/\(imageName)"
+      file = "./Data/\(imageName)"
       format = "\(fmt)"
       if = "none"
 
@@ -39,7 +39,7 @@ local function driveSections(idx: Int, imageName: String, architecture: UTM.Syst
     // x86_64 (q35): if=virtio resolves to virtio-blk-pci — simple and correct
     """
     [drive "\(id)"]
-      file = "/QEMU_DATA_PATH/\(imageName)"
+      file = "./Data/\(imageName)"
       format = "\(fmt)"
       if = "virtio"
     
@@ -71,8 +71,8 @@ function config(
   #   - Display/serial redirection — -display none, -chardev, -serial
   # Use the companion qemu.sh script which handles all of the above.
   #
-  # Disk paths use /QEMU_DATA_PATH/ sentinel — replaced by `make qemu-fixpaths`
-  # or automatically by qemu.sh at launch time.
+  # Disk paths are relative (./Data/...) — qemu.sh changes to this directory
+  # before launching QEMU so relative paths resolve correctly.
 
   [machine]
     type = "\(machineType)"
@@ -131,7 +131,6 @@ function launchScript(
   # Resolve paths relative to this script (works when run from any directory)
   SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
   CFG_FILE="$SCRIPT_DIR/qemu.cfg"
-  DATA_DIR="$SCRIPT_DIR/Data"
 
   # ── Parse arguments ──
   BACKGROUND=0
@@ -156,14 +155,8 @@ function launchScript(
     fi
   fi
 
-  # ── Fix data paths in qemu.cfg ──
-  # Create a resolved copy with actual paths (deterministic path based on VM name).
-  # Foreground: cleaned up on exit.  Background: persists alongside PID/log files.
-  CFG_RESOLVED="/tmp/qemu-\(vmName).cfg"
-  sed "s|/QEMU_DATA_PATH|$DATA_DIR|g" "$CFG_FILE" > "$CFG_RESOLVED"
-  if [ "$BACKGROUND" = "0" ]; then
-    trap 'rm -f "$CFG_RESOLVED" \(if (isArm) "\"$VARS_COPY\" 2>/dev/null" else "")' EXIT
-  fi
+  # Change to script directory so relative paths in qemu.cfg (./Data/...) resolve correctly
+  cd "$SCRIPT_DIR"
 
   # ── Accelerator detection ──
   ACCEL="${QEMU_ACCEL:-}"
@@ -232,6 +225,9 @@ function launchScript(
   if [ -n "$EFI_VARS_SRC" ]; then
     cp "$EFI_VARS_SRC" "$VARS_COPY"
   fi
+  if [ "$BACKGROUND" = "0" ]; then
+    trap 'rm -f "$VARS_COPY" 2>/dev/null' EXIT
+  fi
   # stat follows symlinks (-L) — critical on ubuntu-24.04-arm where AAVMF_CODE.fd is a symlink
   CODE_SIZE="$(stat -Lc%s "$EFI_CODE" 2>/dev/null || stat -f%z "$EFI_CODE")"
   # Truncate/pad vars to match code ROM size (both pflash units must be identical)
@@ -270,7 +266,7 @@ function launchScript(
   # ── Assemble and run ──
   # shellcheck disable=SC2086
   CMD="$QEMU \\
-    --readconfig $CFG_RESOLVED \\
+    --readconfig $CFG_FILE \\
     $ACCEL_FLAGS \\
     $CPU_FLAGS \\
     $PFLASH_FLAGS \\

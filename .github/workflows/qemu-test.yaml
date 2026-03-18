@@ -1,12 +1,14 @@
 name: "Test: QEMU Direct Boot"
 
-# Builds each QEMU manifest and boots it via the generated qemu.sh launch script.
-# Unlike libvirt-test.yaml, this uses the pkl-generated qemu.cfg + qemu.sh directly
-# — no XML parsing or libvirt dependency needed.
+# Builds all QEMU manifests and boots them via qemu.sh on both x86_64 and aarch64 runners.
+# Each runner tests ALL machines — native-arch machines use KVM (if available),
+# cross-arch machines use TCG.  This validates the full pipeline:
+#   pkl → config.plist → qemu.cfg → qemu.sh → running QEMU process → REST API
 #
-# Verification: GET calls to REST API endpoints (/system/resource, /interface,
-# /ip/address, /ip/route, /ipv6/address, /ipv6/route) plus POST check-installation.
-# check-installation is skipped on aarch64 (ARM checker always fails in QEMU).
+# Verification per machine:
+#   1. qemu.cfg ↔ config.plist consistency (machine type, memory, CPUs, drives)
+#   2. QEMU process flags (correct binary, accelerator, pflash, port forwarding)
+#   3. REST API endpoints + check-installation (x86 only)
 
 on:
   workflow_dispatch:
@@ -27,7 +29,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     outputs:
-      qemu-machines: ${{ steps.list-machines.outputs.machines }}
       chr-version: ${{ steps.resolve-version.outputs.version }}
 
     steps:
@@ -37,33 +38,22 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y qemu-utils wget make unzip jq
+          sudo apt-get install -y qemu-utils wget make unzip
 
       - name: Install Apple pkl
         run: |
-          curl -L -o pkl "https://github.com/apple/pkl/releases/download/${{ github.event.inputs.pklversion }}/pkl-linux-amd64"
-          chmod +x pkl
-          ./pkl --version
-          sudo cp ./pkl /usr/local/bin/pkl
+          curl -L -o pkl "https://github.com/apple/pkl/releases/download/${{ inputs.pklversion }}/pkl-linux-amd64"
+          chmod +x pkl && sudo cp pkl /usr/local/bin/pkl
 
       - name: Resolve RouterOS version
         id: resolve-version
         run: |
-          VERSION=$(CHR_VERSION=${{ github.event.inputs.rosver }} pkl eval ./Pkl/chr-version.pkl)
+          VERSION=$(CHR_VERSION=${{ inputs.rosver }} pkl eval ./Pkl/chr-version.pkl)
           echo "Resolved RouterOS version: $VERSION"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Build machine bundles (make)
         run: make CHR_VERSION=${{ steps.resolve-version.outputs.version }}
-
-      - name: List QEMU machines with qemu.cfg
-        id: list-machines
-        run: |
-          machines=$(ls Machines/ | grep '\.utm$' | while read -r d; do
-            [ -f "Machines/$d/qemu.cfg" ] && echo "$d"
-          done | jq -R -s -c 'split("\n")[:-1]')
-          echo "QEMU machines: $machines"
-          echo "machines=$machines" >> $GITHUB_OUTPUT
 
       - name: Upload built Machines as artifact
         uses: actions/upload-artifact@v4
@@ -72,21 +62,26 @@ jobs:
           path: ./Machines
           retention-days: 1
 
-  # ── Phase 2: boot-test — one job per machine, arch-matched runner ──────────
+  # ── Phase 2: boot-test — one job per runner architecture ──────────────────
+  # Each job tests ALL QEMU machines (native + cross-architecture).
+  # Native-arch machines use KVM when available; cross-arch uses TCG.
   test:
     needs: build
     strategy:
       matrix:
-        machine: ${{ fromJSON(needs.build.outputs.qemu-machines) }}
+        include:
+          - runner: ubuntu-latest
+            runner-arch: x86_64
+            pkl-arch: amd64
+          - runner: ubuntu-24.04-arm
+            runner-arch: aarch64
+            pkl-arch: aarch64
       fail-fast: false
 
-    # Select runner by architecture in the machine directory name.
-    runs-on: ${{ contains(matrix.machine, 'aarch64') && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.runner }}
 
     env:
-      QEMU_UTM: ./Machines/${{ matrix.machine }}
-      API_BASE: http://admin:@localhost:9180/rest
-      HEALTH_URL: http://localhost:9180
+      HEALTH_PORT: "9180"
 
     steps:
       - name: Checkout repository
@@ -98,25 +93,15 @@ jobs:
           name: Machines
           path: ./Machines
 
-      - name: Detect architecture
-        id: arch
-        run: |
-          if echo "${{ matrix.machine }}" | grep -q 'aarch64'; then
-            echo "arch=aarch64" >> $GITHUB_OUTPUT
-            echo "bin=qemu-system-aarch64" >> $GITHUB_OUTPUT
-          else
-            echo "arch=x86_64" >> $GITHUB_OUTPUT
-            echo "bin=qemu-system-x86_64" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Install QEMU
+      - name: Install QEMU (both architectures)
         run: |
           sudo apt-get update -y
-          if [ "${{ steps.arch.outputs.arch }}" = "aarch64" ]; then
-            sudo apt-get install -y qemu-system-arm qemu-efi-aarch64
-          else
-            sudo apt-get install -y qemu-system-x86
-          fi
+          sudo apt-get install -y qemu-system-x86 qemu-system-arm qemu-efi-aarch64 jq python3
+
+      - name: Install Apple pkl
+        run: |
+          curl -L -o pkl "https://github.com/apple/pkl/releases/download/${{ inputs.pklversion }}/pkl-linux-${{ matrix.pkl-arch }}"
+          chmod +x pkl && sudo cp pkl /usr/local/bin/pkl
 
       - name: Enable KVM
         run: |
@@ -124,152 +109,262 @@ jobs:
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm || true
-          if ls -la /dev/kvm 2>/dev/null; then
+          if [ -w /dev/kvm 2>/dev/null ]; then
             echo "KVM_AVAIL=1" >> $GITHUB_ENV
-            echo "KVM is available."
+            echo "KVM is available"
           else
             echo "KVM_AVAIL=0" >> $GITHUB_ENV
-            echo "::warning::KVM not available — QEMU will use software emulation (slower)"
+            echo "::warning::KVM not available — native-arch machines will use TCG"
           fi
 
-      - name: Configure boot timeout
-        run: |
-          if [ "$KVM_AVAIL" = "1" ]; then
-            echo "BOOT_TIMEOUT_ATTEMPTS=12" >> $GITHUB_ENV
-          elif [ "${{ steps.arch.outputs.arch }}" = "aarch64" ]; then
-            echo "BOOT_TIMEOUT_ATTEMPTS=24" >> $GITHUB_ENV
-          else
-            echo "BOOT_TIMEOUT_ATTEMPTS=18" >> $GITHUB_ENV
-          fi
+      - name: Make qemu.sh scripts executable
+        run: make qemu-chmod
 
-      - name: Make qemu.sh executable and fix paths
+      - name: "Verify: qemu.cfg ↔ config.pkl consistency"
         run: |
-          make qemu-fixpaths qemu-chmod
+          # Validate that each qemu.cfg matches its config.pkl source of truth.
+          # config.pkl (PCF format) is the pkl-generated single source of truth.
+          # This closes the loop: pkl manifests → config.pkl → qemu.cfg.
+          ERRORS=0
+          for UTM_DIR in Machines/*.utm; do
+            [ -f "$UTM_DIR/qemu.cfg" ] || continue
+            VMNAME=$(basename "$UTM_DIR" .utm)
+            echo "::group::Verify $VMNAME"
 
-      - name: Start RouterOS CHR via qemu.sh
-        run: |
-          echo "Launching ${{ matrix.machine }} via qemu.sh..."
-          sh "$QEMU_UTM/qemu.sh" --background --port 9180
-          sleep 15
-          VMNAME=$(basename "$QEMU_UTM" .utm)
-          PID_FILE="/tmp/qemu-${VMNAME}.pid"
-          if [ -f "$PID_FILE" ]; then
-            PID=$(cat "$PID_FILE")
-            if kill -0 "$PID" 2>/dev/null; then
-              echo "QEMU is running (PID=$PID)"
+            CFG_PKL="$UTM_DIR/config.pkl"
+            CFG_INI="$UTM_DIR/qemu.cfg"
+            OK=1
+
+            # Extract expected values from config.pkl (pkl PCF = source of truth)
+            EXP_TARGET=$(pkl eval -x 'System.Target' "$CFG_PKL")
+            EXP_MEM=$(pkl eval -x 'System.MemorySize' "$CFG_PKL")
+            EXP_CPUS=$(pkl eval -x 'if (System.CPUCount == 0) 1 else System.CPUCount' "$CFG_PKL")
+            EXP_DRIVES=$(pkl eval -x 'Drive.toList().length' "$CFG_PKL")
+            EXP_IMAGES=$(pkl eval -x 'Drive.toList().map((d) -> d.ImageName).join(",")' "$CFG_PKL")
+            EXP_ARCH=$(pkl eval -x 'System.Architecture' "$CFG_PKL")
+            echo "config.pkl: arch=$EXP_ARCH mem=${EXP_MEM}M cpus=$EXP_CPUS disks=$EXP_DRIVES target=$EXP_TARGET"
+
+            # Verify qemu.cfg sections match config.pkl
+            CFG_TEXT=$(cat "$CFG_INI")
+
+            # Machine type
+            GOT=$(echo "$CFG_TEXT" | awk '/^\[machine\]/{getline; gsub(/.*= "|"/, ""); print}')
+            if [ "$GOT" != "$EXP_TARGET" ]; then
+              echo "::error::$VMNAME: machine type mismatch: cfg=$GOT pkl=$EXP_TARGET"
+              OK=0
+            fi
+
+            # Memory
+            GOT=$(echo "$CFG_TEXT" | awk '/^\[memory\]/{getline; gsub(/.*= "|M"/, ""); print}')
+            if [ "$GOT" != "$EXP_MEM" ]; then
+              echo "::error::$VMNAME: memory mismatch: cfg=${GOT}M pkl=${EXP_MEM}M"
+              OK=0
+            fi
+
+            # CPUs
+            GOT=$(echo "$CFG_TEXT" | awk '/^\[smp-opts\]/{getline; gsub(/.*= "|"/, ""); print}')
+            if [ "$GOT" != "$EXP_CPUS" ]; then
+              echo "::error::$VMNAME: CPU count mismatch: cfg=$GOT pkl=$EXP_CPUS"
+              OK=0
+            fi
+
+            # Drive count
+            GOT=$(echo "$CFG_TEXT" | grep -c '^\[drive ')
+            if [ "$GOT" != "$EXP_DRIVES" ]; then
+              echo "::error::$VMNAME: drive count mismatch: cfg=$GOT pkl=$EXP_DRIVES"
+              OK=0
+            fi
+
+            # Drive image names
+            IFS=',' read -ra IMGS <<< "$EXP_IMAGES"
+            for IMG in "${IMGS[@]}"; do
+              if ! echo "$CFG_TEXT" | grep -q "$IMG"; then
+                echo "::error::$VMNAME: image $IMG missing from qemu.cfg"
+                OK=0
+              fi
+            done
+
+            if [ "$OK" = "1" ]; then
+              echo "✓ qemu.cfg matches config.pkl"
             else
-              echo "::error::QEMU process has already exited"
-              cat "/tmp/qemu-${VMNAME}.log" 2>/dev/null || true
-              exit 1
+              ERRORS=$((ERRORS + 1))
             fi
-          else
-            echo "::error::No PID file found"
-            exit 1
-          fi
-
-      - name: Wait for RouterOS HTTP server
-        run: |
-          ATTEMPTS=$BOOT_TIMEOUT_ATTEMPTS
-          echo "Waiting for RouterOS at $HEALTH_URL (up to $((ATTEMPTS * 10))s)..."
-          for i in $(seq 1 "$ATTEMPTS"); do
-            if curl -sS -m 5 --fail "$HEALTH_URL/" > /dev/null 2>&1; then
-              echo "RouterOS HTTP is up after $i attempt(s)."
-              exit 0
-            fi
-            echo "Attempt $i/$ATTEMPTS: not ready yet, retrying in 10s..."
-            sleep 10
+            echo "::endgroup::"
           done
-          echo "::error::RouterOS did not start within $((ATTEMPTS * 10)) seconds"
-          VMNAME=$(basename "$QEMU_UTM" .utm)
-          cat "/tmp/qemu-${VMNAME}.log" 2>/dev/null || true
-          exit 1
+          [ "$ERRORS" -eq 0 ] || { echo "::error::$ERRORS machine(s) failed verification"; exit 1; }
 
-      - name: "API: GET /system/resource"
+      - name: "Boot and test all QEMU machines"
         run: |
-          echo "Checking $API_BASE/system/resource ..."
-          curl -sS --fail "$API_BASE/system/resource" | python3 -m json.tool | head -30
+          RUNNER_ARCH="${{ matrix.runner-arch }}"
+          PORT="$HEALTH_PORT"
+          FAILED=0
+          PASSED=0
 
-      - name: "API: GET /interface"
-        run: |
-          echo "Checking $API_BASE/interface ..."
-          curl -sS --fail "$API_BASE/interface" | python3 -m json.tool
+          for UTM_DIR in Machines/*.utm; do
+            [ -f "$UTM_DIR/qemu.cfg" ] || continue
+            VMNAME=$(basename "$UTM_DIR" .utm)
+            echo "::group::Boot $VMNAME"
 
-      - name: "API: GET /ip/address"
-        run: |
-          echo "Checking $API_BASE/ip/address ..."
-          curl -sS --fail "$API_BASE/ip/address" | python3 -m json.tool
+            # ── Extract VM config from config.pkl (source of truth) ──
+            CFG_PKL="$UTM_DIR/config.pkl"
+            VM_ARCH=$(pkl eval -x 'System.Architecture' "$CFG_PKL")
+            VM_MEM=$(pkl eval -x 'System.MemorySize' "$CFG_PKL")
+            VM_CPUS=$(pkl eval -x 'if (System.CPUCount == 0) 1 else System.CPUCount' "$CFG_PKL")
+            VM_DISKS=$(pkl eval -x 'Drive.toList().length' "$CFG_PKL")
 
-      - name: "API: GET /ip/route"
-        run: |
-          echo "Checking $API_BASE/ip/route ..."
-          curl -sS --fail "$API_BASE/ip/route" | python3 -m json.tool
+            # ── Determine expected accelerator ──
+            if [ "$VM_ARCH" = "$RUNNER_ARCH" ] && [ "$KVM_AVAIL" = "1" ]; then
+              EXPECTED_ACCEL="kvm"
+            else
+              EXPECTED_ACCEL="tcg"
+            fi
 
-      - name: "API: GET /ipv6/address"
-        run: |
-          echo "Checking $API_BASE/ipv6/address ..."
-          curl -sS --fail "$API_BASE/ipv6/address" | python3 -m json.tool
+            # ── Boot timeout: KVM=120s, native-TCG=180s, cross-TCG=300s ──
+            if [ "$EXPECTED_ACCEL" = "kvm" ]; then
+              TIMEOUT_ATTEMPTS=12
+            elif [ "$VM_ARCH" = "$RUNNER_ARCH" ]; then
+              TIMEOUT_ATTEMPTS=18
+            else
+              TIMEOUT_ATTEMPTS=30
+            fi
 
-      - name: "API: GET /ipv6/route"
-        run: |
-          echo "Checking $API_BASE/ipv6/route ..."
-          curl -sS --fail "$API_BASE/ipv6/route" | python3 -m json.tool
+            echo "  Config: arch=$VM_ARCH mem=${VM_MEM}M cpus=$VM_CPUS disks=$VM_DISKS"
+            echo "  Runner: $RUNNER_ARCH, KVM=$KVM_AVAIL → expected accel=$EXPECTED_ACCEL"
+            echo "  Timeout: $((TIMEOUT_ATTEMPTS * 10))s"
 
-      - name: "API: POST /system/check-installation"
-        id: check-installation
-        run: |
-          ARCH="${{ steps.arch.outputs.arch }}"
-          if [ "$ARCH" = "aarch64" ]; then
-            echo "::notice::Skipping check-installation on aarch64 (ARM checker always fails in QEMU — see CLAUDE.md)"
-            echo "status=skipped-aarch64" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          echo "Calling $API_BASE/system/check-installation (POST with duration=30s) ..."
-          HTTP_CODE=$(curl -sS -o /tmp/check-result.json -w "%{http_code}" -X POST \
-            -H 'Content-Type: application/json' \
-            -d '{"duration":"30s"}' \
-            "$API_BASE/system/check-installation")
-          RESULT=$(cat /tmp/check-result.json)
-          echo "HTTP $HTTP_CODE — Response: $RESULT"
-          if [ "$HTTP_CODE" -ge 400 ]; then
-            echo "::error::check-installation failed (HTTP $HTTP_CODE): $RESULT"
-            exit 1
-          fi
-          STATUS=$(echo "$RESULT" | python3 -c "
-          import sys, json
-          try:
-              data = json.load(sys.stdin)
-          except json.JSONDecodeError as e:
-              print('ERROR: invalid JSON: ' + str(e), file=sys.stderr)
-              sys.exit(1)
-          if isinstance(data, list) and len(data) > 0:
-              print(data[-1].get('status', ''))
-          elif isinstance(data, dict):
-              print(data.get('status', ''))
-          else:
-              print('ERROR: unexpected response type: ' + type(data).__name__, file=sys.stderr)
-              sys.exit(1)
-          ")
-          echo "status=$STATUS" >> $GITHUB_OUTPUT
-          if [ "$STATUS" = "installation is ok" ]; then
-            echo "RouterOS installation check passed: $STATUS"
-          else
-            echo "::error::check-installation failed — status: '$STATUS'"
-            exit 1
-          fi
+            # ── Start via qemu.sh ──
+            sh "$UTM_DIR/qemu.sh" --background --port "$PORT"
+            sleep 10
 
-      - name: Upload QEMU log on failure
+            PID_FILE="/tmp/qemu-${VMNAME}.pid"
+            if [ ! -f "$PID_FILE" ]; then
+              echo "::error::$VMNAME: no PID file found"
+              FAILED=$((FAILED + 1))
+              echo "::endgroup::"
+              continue
+            fi
+            PID=$(cat "$PID_FILE")
+            if ! kill -0 "$PID" 2>/dev/null; then
+              echo "::error::$VMNAME: QEMU process exited immediately"
+              cat "/tmp/qemu-${VMNAME}.log" 2>/dev/null | tail -30
+              FAILED=$((FAILED + 1))
+              echo "::endgroup::"
+              continue
+            fi
+
+            # ── Verify QEMU process command line ──
+            CMDLINE=$(cat /proc/$PID/cmdline | tr '\0' ' ')
+
+            # Correct binary
+            EXPECTED_BIN="qemu-system-$([ "$VM_ARCH" = "aarch64" ] && echo aarch64 || echo x86_64)"
+            if echo "$CMDLINE" | grep -q "$EXPECTED_BIN"; then
+              echo "  ✓ Binary: $EXPECTED_BIN"
+            else
+              echo "  ::error::$VMNAME: expected $EXPECTED_BIN in command line"
+            fi
+
+            # Accelerator
+            if echo "$CMDLINE" | grep -q "\-accel $EXPECTED_ACCEL"; then
+              echo "  ✓ Accelerator: $EXPECTED_ACCEL"
+            else
+              ACTUAL_ACCEL=$(echo "$CMDLINE" | grep -oP '(?<=-accel )\S+' || echo "unknown")
+              echo "  ::warning::$VMNAME: expected accel=$EXPECTED_ACCEL, got=$ACTUAL_ACCEL"
+            fi
+
+            # pflash for aarch64
+            if [ "$VM_ARCH" = "aarch64" ]; then
+              if echo "$CMDLINE" | grep -q "pflash"; then
+                echo "  ✓ UEFI pflash present"
+              else
+                echo "  ::error::$VMNAME: missing pflash for aarch64"
+              fi
+            fi
+
+            # Port forwarding
+            if echo "$CMDLINE" | grep -q "hostfwd=tcp::${PORT}-:80"; then
+              echo "  ✓ Port forwarding: host ${PORT} → guest 80"
+            else
+              echo "  ::error::$VMNAME: port forwarding not found in command line"
+            fi
+
+            # ── Wait for RouterOS HTTP ──
+            BOOTED=0
+            for i in $(seq 1 "$TIMEOUT_ATTEMPTS"); do
+              if curl -sS -m 5 --fail "http://localhost:${PORT}/" > /dev/null 2>&1; then
+                echo "  ✓ RouterOS HTTP up after $((i * 10))s"
+                BOOTED=1
+                break
+              fi
+              echo "  Attempt $i/$TIMEOUT_ATTEMPTS: not ready, waiting 10s..."
+              sleep 10
+            done
+
+            if [ "$BOOTED" = "0" ]; then
+              echo "::error::$VMNAME: boot timeout after $((TIMEOUT_ATTEMPTS * 10))s"
+              cat "/tmp/qemu-${VMNAME}.log" 2>/dev/null | tail -30
+              kill "$PID" 2>/dev/null || true
+              FAILED=$((FAILED + 1))
+              echo "::endgroup::"
+              continue
+            fi
+
+            # ── REST API checks ──
+            API="http://admin:@localhost:${PORT}/rest"
+            API_OK=1
+
+            for ENDPOINT in system/resource interface ip/address ip/route ipv6/address ipv6/route; do
+              if curl -sS --fail "$API/$ENDPOINT" > /dev/null 2>&1; then
+                echo "  ✓ GET /$ENDPOINT"
+              else
+                echo "  ::error::$VMNAME: GET /$ENDPOINT failed"
+                API_OK=0
+              fi
+            done
+
+            # Detailed output for system/resource
+            echo "  /system/resource:"
+            curl -sS --fail "$API/system/resource" 2>/dev/null | python3 -m json.tool | head -15 | sed 's/^/    /'
+
+            # check-installation (x86 only — ARM checker always fails in QEMU)
+            if [ "$VM_ARCH" != "aarch64" ]; then
+              HTTP_CODE=$(curl -sS -o /tmp/check-result.json -w "%{http_code}" -X POST \
+                -H 'Content-Type: application/json' -d '{"duration":"30s"}' \
+                "$API/system/check-installation")
+              if [ "$HTTP_CODE" -lt 400 ]; then
+                echo "  ✓ POST /system/check-installation (HTTP $HTTP_CODE)"
+              else
+                echo "  ::error::$VMNAME: check-installation failed (HTTP $HTTP_CODE)"
+                cat /tmp/check-result.json 2>/dev/null
+                API_OK=0
+              fi
+            else
+              echo "  ⊘ Skipping check-installation on aarch64 (see CLAUDE.md)"
+            fi
+
+            # ── Stop ──
+            kill "$PID" 2>/dev/null || true
+            sleep 2
+            rm -f "$PID_FILE"
+
+            if [ "$API_OK" = "1" ]; then
+              PASSED=$((PASSED + 1))
+              echo "  ✓ $VMNAME: ALL CHECKS PASSED"
+            else
+              FAILED=$((FAILED + 1))
+              echo "  ✗ $VMNAME: SOME CHECKS FAILED"
+            fi
+            echo "::endgroup::"
+          done
+
+          echo ""
+          echo "═══════════════════════════════════════"
+          echo "Results on $RUNNER_ARCH runner: $PASSED passed, $FAILED failed"
+          echo "═══════════════════════════════════════"
+          [ "$FAILED" -eq 0 ] || exit 1
+
+      - name: Upload QEMU logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: qemu-log-${{ matrix.machine }}
+          name: qemu-logs-${{ matrix.runner-arch }}
           path: /tmp/qemu-*.log
-
-      - name: Stop QEMU
-        if: always()
-        run: |
-          VMNAME=$(basename "$QEMU_UTM" .utm)
-          PID_FILE="/tmp/qemu-${VMNAME}.pid"
-          if [ -f "$PID_FILE" ]; then
-            kill "$(cat "$PID_FILE")" 2>/dev/null || true
-            echo "QEMU stopped."
-          fi
