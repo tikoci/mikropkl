@@ -1,9 +1,10 @@
 name: "Test: QEMU Direct Boot"
 
 # Builds all QEMU manifests and boots them via qemu.sh on x86_64 and aarch64 runners.
-# x86_64 runner: boots ALL machines (x86 native via KVM, aarch64 cross-arch via TCG).
-# aarch64 runner: boots only native aarch64 machines (x86 cross-arch not viable).
-# qemu.cfg ↔ config.pkl consistency is checked for ALL machines on both runners.
+# x86_64 runner (Linux): boots ALL machines (x86 native via KVM, aarch64 cross-arch via TCG).
+# aarch64 runners (Linux + macOS): boot native aarch64 machines only (x86 cross-arch not viable).
+# macOS runner uses HVF for native aarch64, Linux uses KVM (when available) or TCG.
+# qemu.cfg ↔ config.pkl consistency is checked for ALL machines on all runners.
 # This validates the full pipeline:
 #   pkl → config.plist → qemu.cfg → qemu.sh → running QEMU process → REST API
 #
@@ -13,7 +14,7 @@ name: "Test: QEMU Direct Boot"
 #   3. REST API endpoints + check-installation (x86 only)
 #
 # Cross-arch notes:
-#   x86_64 on aarch64: NOT viable — x86 I/O port emulation has no ARM equivalent.
+#   x86_64 on aarch64: NOT viable (any host OS) — x86 I/O port emulation has no ARM equivalent.
 #   aarch64 on x86_64: Works well (~20s) — EDK2 UEFI uses 64-bit MMIO throughout.
 
 on:
@@ -76,16 +77,19 @@ jobs:
   # consistency and boot every machine.
   test:
     needs: build
-    name: "test (${{ matrix.runner-arch }})"
+    name: "test (${{ matrix.runner }})"
     strategy:
       matrix:
         include:
           - runner: ubuntu-latest
             runner-arch: x86_64
-            pkl-arch: amd64
+            pkl-binary: pkl-linux-amd64
           - runner: ubuntu-24.04-arm
             runner-arch: aarch64
-            pkl-arch: aarch64
+            pkl-binary: pkl-linux-aarch64
+          - runner: macos-15
+            runner-arch: aarch64
+            pkl-binary: pkl-macos-aarch64
       fail-fast: false
 
     runs-on: ${{ matrix.runner }}
@@ -103,12 +107,18 @@ jobs:
           name: Machines
           path: ./Machines
 
-      - name: Install QEMU (both architectures)
+      - name: Install QEMU and tools (Linux)
+        if: runner.os == 'Linux'
         run: |
           echo "::group::apt-get install"
           sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends qemu-system-x86 qemu-system-arm qemu-efi-aarch64 ovmf jq python3 socat
           echo "::endgroup::"
+
+      - name: Install QEMU and tools (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install qemu socat
 
       - name: Log QEMU versions
         run: |
@@ -118,10 +128,11 @@ jobs:
 
       - name: Install Apple pkl
         run: |
-          curl -fsSL -o pkl "https://github.com/apple/pkl/releases/download/${{ inputs.pklversion }}/pkl-linux-${{ matrix.pkl-arch }}"
+          curl -fsSL -o pkl "https://github.com/apple/pkl/releases/download/${{ inputs.pklversion }}/${{ matrix.pkl-binary }}"
           chmod +x pkl && sudo cp pkl /usr/local/bin/pkl
 
-      - name: Enable KVM
+      - name: Enable KVM (Linux)
+        if: runner.os == 'Linux'
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -134,6 +145,12 @@ jobs:
             echo "KVM_AVAIL=0" >> $GITHUB_ENV
             echo "::notice::KVM not available — machines will use TCG"
           fi
+
+      - name: Set accelerator info (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          echo "KVM_AVAIL=0" >> $GITHUB_ENV
+          echo "Using Hypervisor.framework (HVF) for native-arch guests, TCG for cross-arch"
 
       - name: Make qemu.sh scripts executable
         run: make qemu-chmod
@@ -224,6 +241,36 @@ jobs:
           SKIPPED=0
           TIMING_RESULTS=""
 
+          # ── Platform detection ──
+          OS_TYPE="$(uname -s)"
+          HOST_UNAME="$(uname -m)"
+          # Normalize arm64 → aarch64 for comparison with pkl arch values
+          case "$HOST_UNAME" in arm64) HOST_ARCH_NORM="aarch64" ;; *) HOST_ARCH_NORM="$HOST_UNAME" ;; esac
+
+          # ── Cross-platform helpers ──
+          # /proc is Linux-only; fall back to ps on macOS
+          get_cmdline() {
+            if [ -d /proc/"$1" ]; then
+              tr '\0' ' ' < /proc/"$1"/cmdline 2>/dev/null
+            else
+              ps -p "$1" -o args= 2>/dev/null
+            fi
+          }
+          get_proc_state() {
+            if [ -f /proc/"$1"/stat ]; then
+              awk '{print $3}' /proc/"$1"/stat 2>/dev/null
+            else
+              ps -p "$1" -o state= 2>/dev/null | tr -d ' '
+            fi
+          }
+          list_listening() {
+            if command -v ss >/dev/null 2>&1; then
+              ss -tlnp 2>/dev/null | grep -E "$1|State"
+            else
+              lsof -iTCP:"$1" -sTCP:LISTEN -P -n 2>/dev/null
+            fi
+          }
+
           for UTM_DIR in Machines/*.utm; do
             [ -f "$UTM_DIR/qemu.cfg" ] || continue
             VMNAME=$(basename "$UTM_DIR" .utm)
@@ -237,15 +284,17 @@ jobs:
             VM_DISKS=$(pkl eval -x 'Drive.toList().length' "$CFG_PKL")
 
             # ── Determine expected accelerator ──
-            # KVM only when host and guest architectures match
-            if [ "$VM_ARCH" = "$RUNNER_ARCH" ] && [ "$KVM_AVAIL" = "1" ]; then
+            # HVF on macOS native-arch, KVM on Linux native-arch, TCG for cross-arch
+            if [ "$VM_ARCH" = "$HOST_ARCH_NORM" ] && [ "$OS_TYPE" = "Darwin" ]; then
+              EXPECTED_ACCEL="hvf"
+            elif [ "$VM_ARCH" = "$HOST_ARCH_NORM" ] && [ "$KVM_AVAIL" = "1" ]; then
               EXPECTED_ACCEL="kvm"
             else
               EXPECTED_ACCEL="tcg"
             fi
 
-            # ── Boot timeout (poll every 5s): KVM=30s, TCG=60s ──
-            if [ "$EXPECTED_ACCEL" = "kvm" ]; then
+            # ── Boot timeout (poll every 5s): HW-accel=30s, TCG=60s ──
+            if [ "$EXPECTED_ACCEL" = "kvm" ] || [ "$EXPECTED_ACCEL" = "hvf" ]; then
               TIMEOUT_ATTEMPTS=6     # 30s
             else
               TIMEOUT_ATTEMPTS=12    # 60s
@@ -259,12 +308,12 @@ jobs:
             echo "  Runner: $RUNNER_ARCH, KVM=$KVM_AVAIL → expected accel=$EXPECTED_ACCEL"
             echo "  Port: $PORT, Timeout: $((TIMEOUT_ATTEMPTS * 5))s"
 
-            # ── Skip x86_64 cross-arch on aarch64 runner ──
+            # ── Skip x86_64 cross-arch on aarch64 runner (any OS) ──
             # x86_64 on ARM64 TCG is not viable — I/O port emulation has no ARM
             # hardware equivalent.  Even OVMF + modern virtio + pc machine + HPET
             # cannot boot within 300s (tested over 16 CI iterations).
             # aarch64 on x86_64 works fine (~20s) — EDK2 uses 64-bit MMIO.
-            if [ "$VM_ARCH" != "$RUNNER_ARCH" ] && [ "$RUNNER_ARCH" = "aarch64" ]; then
+            if [ "$VM_ARCH" != "$HOST_ARCH_NORM" ] && [ "$HOST_ARCH_NORM" = "aarch64" ]; then
               echo "::warning::$VMNAME: skipping x86_64 on aarch64 (not viable — TCG I/O port bottleneck)"
               SKIPPED=$((SKIPPED + 1))
               TIMING_RESULTS="${TIMING_RESULTS}  ⊘ ${VMNAME}: skipped (x86_64 on aarch64)\n"
@@ -330,7 +379,7 @@ jobs:
             fi
 
             # ── Verify QEMU process command line ──
-            CMDLINE=$(cat /proc/$QEMU_PID/cmdline 2>/dev/null | tr '\0' ' ' || cat /proc/$PID/cmdline | tr '\0' ' ')
+            CMDLINE=$(get_cmdline "$QEMU_PID" || get_cmdline "$PID")
 
             # Correct binary
             EXPECTED_BIN="qemu-system-$([ "$VM_ARCH" = "aarch64" ] && echo aarch64 || echo x86_64)"
@@ -344,7 +393,8 @@ jobs:
             if echo "$CMDLINE" | grep -q "\-accel $EXPECTED_ACCEL"; then
               echo "  ✓ Accelerator: $EXPECTED_ACCEL"
             else
-              ACTUAL_ACCEL=$(echo "$CMDLINE" | grep -oP '(?<=-accel )\S+' || echo "unknown")
+              ACTUAL_ACCEL=$(echo "$CMDLINE" | sed -n 's/.*-accel \([^ ]*\).*/\1/p')
+              [ -z "$ACTUAL_ACCEL" ] && ACTUAL_ACCEL="unknown"
               echo "  ::warning::$VMNAME: expected accel=$EXPECTED_ACCEL, got=$ACTUAL_ACCEL"
             fi
 
@@ -380,7 +430,7 @@ jobs:
                 BOOTED=1
                 break
               fi
-              STATE=$(awk '{print $3}' /proc/$QEMU_PID/stat 2>/dev/null || echo "?")
+              STATE=$(get_proc_state "$QEMU_PID" || echo "?")
               CPU=$(ps -p "$QEMU_PID" -o %cpu= 2>/dev/null || echo "?")
               echo "  Attempt $i/$TIMEOUT_ATTEMPTS: not ready (qemu_pid=$QEMU_PID state=$STATE cpu=${CPU}%) — waiting ${POLL}s"
               sleep "$POLL"
@@ -413,7 +463,7 @@ jobs:
                 ps -p "$PID" -o pid,stat,%cpu,%mem,time,args 2>/dev/null || true
               fi
               echo "--- Listening ports ---"
-              ss -tlnp 2>/dev/null | grep -E "$PORT|State" || echo "(port $PORT not listening)"
+              list_listening "$PORT" || echo "(port $PORT not listening)"
               echo "--- Serial console (captured from boot start, last 50 lines) ---"
               if [ -n "$SOCAT_PID" ]; then
                 kill "$SOCAT_PID" 2>/dev/null || true
@@ -494,7 +544,7 @@ jobs:
 
           echo ""
           echo "══════════════════════════════════════════════════════════"
-          echo "Boot timing — $RUNNER_ARCH runner ($PASSED passed, $FAILED failed, $SKIPPED skipped)"
+          echo "Boot timing — $RUNNER_ARCH/$OS_TYPE runner ($PASSED passed, $FAILED failed, $SKIPPED skipped)"
           echo "══════════════════════════════════════════════════════════"
           printf "$TIMING_RESULTS"
           echo "══════════════════════════════════════════════════════════"
@@ -504,7 +554,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: qemu-logs-${{ matrix.runner-arch }}
+          name: qemu-logs-${{ matrix.runner }}
           path: |
             /tmp/qemu-*.log
             /tmp/qemu-*-serial.log
