@@ -95,7 +95,7 @@ function config(
 
   [machine]
     type = "\(machineType)"
-
+  \(if (useUefi && architecture != "aarch64") "  hpet = \"on\"\n" else "")
   [memory]
     size = "\(memMib)M"
 
