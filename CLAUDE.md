@@ -387,37 +387,33 @@ actual QEMU process.  Consequences of missing `exec`:
 - Orphaned QEMU processes accumulate across sequential test runs, consuming
   memory and potentially causing resource contention for subsequent VMs
 
-### Cross-architecture TCG: x86_64 on aarch64 runner
+### Cross-architecture TCG: x86_64 on aarch64 runner (abandoned)
 
 Running `qemu-system-x86_64` via TCG on an aarch64 host has a fundamental performance
 issue: x86 I/O port instructions (`in`/`out`) have no ARM hardware equivalent (ARM uses
-MMIO exclusively).  This affects both SeaBIOS (16-bit real-mode init) and legacy virtio
-(I/O port BARs for disk/network).  SeaBIOS q35 machines are unusable (~199% CPU, zero
-serial output, 300s timeout).  Even OVMF, which starts in 64-bit mode, is bottlenecked
-by legacy virtio's I/O port BARs during disk reads.
+MMIO exclusively).  This is **not viable** despite extensive optimization attempts over
+16 CI iterations:
+
+- SeaBIOS q35: ~199% CPU, zero serial output, 300s timeout (I/O port init)
+- OVMF q35 + legacy virtio: timeout (I/O port BARs for disk)
+- OVMF `pc` + modern virtio (`disable-legacy="on"`): got further but stuck in
+  timer calibration (PIT I/O ports 0x40-0x43)
+- OVMF `pc` + modern virtio + HPET (`hpet="on"`): kernel advanced further
+  (interrupts enabled, different RIP) but still timed out at 300s
+
+The x86 I/O port bottleneck is pervasive — even with MMIO-based devices, the firmware
+and kernel probe legacy I/O ports during init.  There is no practical path to making
+x86_64 boot on ARM64 TCG within a usable timeout.
 
 The reverse direction (aarch64 on x86_64 via TCG) works fine — boots in ~20s.
+EDK2 UEFI uses 64-bit mode with MMIO throughout, and x86 hardware can emulate
+ARM MMIO efficiently.
 
-**Two-pronged approach:**
-
-1. **`.apple.` machine with OVMF + modern virtio** (primary solution for CI): The
-   `chr.x86_64.apple` bundle has the fat-chr image (proper FAT16 EFI partition) and
-   gets `qemu.cfg` + `qemu.sh` with OVMF (x86_64 UEFI firmware).  Its `qemu.cfg`
-   uses the `pc` (i440fx) machine type instead of `q35` — the simpler PCI topology
-   dramatically reduces PCI config space I/O (ports 0xCF8/0xCFC) during OVMF boot.
-   Virtio devices use explicit `[device]` sections with `disable-legacy = "on"`
-   (force virtio-1.0 modern transport, MMIO BARs instead of I/O port BARs).
-   The launch script adds `-nodefaults` to skip unnecessary device enumeration.
-   Both OVMF and Linux 5.6.3 support virtio-1.0 modern.  OVMF firmware paths searched:
-   - macOS: `/opt/homebrew/share/qemu/edk2-x86_64-code.fd` / `/usr/local/share/qemu/...`
-   - Linux: `/usr/share/OVMF/OVMF_CODE.fd`, `OVMF_CODE_4M.fd`, `/usr/share/edk2/x64/...`
-   - Override: `QEMU_EFI_CODE` / `QEMU_EFI_VARS` environment variables
-
-2. **`.qemu.` machines with SeaBIOS** (skipped on ARM64): The `.qemu.` machines keep
-   SeaBIOS to match their UTM `config.plist` spec (standard MikroTik images, not
-   fat-chr).  Cross-arch SeaBIOS boot on ARM64 is not viable — the CI workflow skips
-   these machines with a `::warning::` annotation when `VM_ARCH != RUNNER_ARCH` and
-   the backend is not Apple.
+**CI strategy (adopted):**
+- **x86_64 runner**: boots ALL machines (x86 native via KVM, aarch64 cross-arch via TCG)
+- **aarch64 runner**: boots only native aarch64 machines (x86 machines skipped)
+- This gives full coverage: every machine is tested natively on its matching runner,
+  plus aarch64 gets additional cross-arch validation on the x86 runner.
 
 See `Lab/x86-cross-arch/NOTES.md` for the full investigation and test scripts.
 
@@ -509,9 +505,14 @@ make qemu-list
 
 Similar structure to `libvirt-test.yaml`: build job + 2 test jobs (x86_64 + aarch64).
 
+#### Cross-arch strategy
+- **x86_64 runner**: boots ALL machines — x86 native via KVM, aarch64 cross-arch via TCG (~20s)
+- **aarch64 runner**: boots only native aarch64 machines — x86 cross-arch skipped (not viable)
+- Boot timing for each machine is displayed outside `::group::` blocks for visibility
+
 #### Package installation
 - Both runners install both architectures: `qemu-system-x86`, `qemu-system-arm`,
-  `qemu-efi-aarch64` — every runner boots ALL machines (native + cross-arch via TCG)
+  `qemu-efi-aarch64` — x86 runner needs aarch64 packages for cross-arch TCG
 
 #### CI conventions for `apt-get` and downloads
 
@@ -552,14 +553,13 @@ run: |
 
 #### Timeouts
 - KVM: 30s (6 × 5s polls)
-- TCG native: 60s (12 × 5s polls)
-- TCG cross-arch: 300s (60 × 5s polls) — x86_64 on aarch64 can take >120s
+- TCG: 60s (12 × 5s polls) — both native and cross-arch (aarch64 on x86)
 
 #### Expected boot times (from CI observations)
-- KVM native: ~20s
-- TCG native: ~20–25s
-- TCG cross-arch (ARM on x86): ~20s
-- TCG cross-arch (x86 on ARM): `.apple.` machine with `pc` + OVMF + modern virtio (see Known Limitations)
+- KVM native (x86 on x86): ~10s
+- TCG native (aarch64 on aarch64): ~20s
+- TCG cross-arch (aarch64 on x86): ~20s
+- TCG cross-arch (x86 on aarch64): not viable — skipped (see Known Limitations)
 
 ## Development Toolchain (macOS Intel)
 

@@ -1,7 +1,8 @@
 name: "Test: QEMU Direct Boot"
 
 # Builds all QEMU manifests and boots them via qemu.sh on x86_64 and aarch64 runners.
-# Each runner boots ALL machines (native via KVM/TCG, cross-arch via TCG).
+# x86_64 runner: boots ALL machines (x86 native via KVM, aarch64 cross-arch via TCG).
+# aarch64 runner: boots only native aarch64 machines (x86 cross-arch not viable).
 # qemu.cfg ↔ config.pkl consistency is checked for ALL machines on both runners.
 # This validates the full pipeline:
 #   pkl → config.plist → qemu.cfg → qemu.sh → running QEMU process → REST API
@@ -10,6 +11,10 @@ name: "Test: QEMU Direct Boot"
 #   1. qemu.cfg ↔ config.pkl consistency (machine type, memory, CPUs, drives)
 #   2. QEMU process flags (correct binary, accelerator, pflash, port forwarding)
 #   3. REST API endpoints + check-installation (x86 only)
+#
+# Cross-arch notes:
+#   x86_64 on aarch64: NOT viable — x86 I/O port emulation has no ARM equivalent.
+#   aarch64 on x86_64: Works well (~20s) — EDK2 UEFI uses 64-bit MMIO throughout.
 
 on:
   workflow_dispatch:
@@ -216,6 +221,8 @@ jobs:
           PORT_OFFSET=0
           FAILED=0
           PASSED=0
+          SKIPPED=0
+          TIMING_RESULTS=""
 
           for UTM_DIR in Machines/*.utm; do
             [ -f "$UTM_DIR/qemu.cfg" ] || continue
@@ -237,11 +244,9 @@ jobs:
               EXPECTED_ACCEL="tcg"
             fi
 
-            # ── Boot timeout (poll every 5s): KVM=30s, native TCG=60s, cross-arch TCG=300s ──
+            # ── Boot timeout (poll every 5s): KVM=30s, TCG=60s ──
             if [ "$EXPECTED_ACCEL" = "kvm" ]; then
               TIMEOUT_ATTEMPTS=6     # 30s
-            elif [ "$VM_ARCH" != "$RUNNER_ARCH" ]; then
-              TIMEOUT_ATTEMPTS=60    # 300s (cross-arch x86 TCG on ARM is very slow)
             else
               TIMEOUT_ATTEMPTS=12    # 60s
             fi
@@ -254,19 +259,21 @@ jobs:
             echo "  Runner: $RUNNER_ARCH, KVM=$KVM_AVAIL → expected accel=$EXPECTED_ACCEL"
             echo "  Port: $PORT, Timeout: $((TIMEOUT_ATTEMPTS * 5))s"
 
-            # ── Skip cross-arch SeaBIOS machines ──
-            # SeaBIOS x86_64 on ARM64 TCG is too slow (I/O port emulation).
-            # Only .apple. machines (OVMF) support cross-arch boot.
-            if [ "$VM_ARCH" != "$RUNNER_ARCH" ]; then
-              BACKEND=$(pkl eval -x 'Backend' "$CFG_PKL" 2>/dev/null || echo "QEMU")
-              if [ "$BACKEND" != "Apple" ]; then
-                echo "::warning::$VMNAME: skipping cross-arch SeaBIOS boot ($VM_ARCH on $RUNNER_ARCH)"
-                echo "::endgroup::"
-                continue
-              fi
+            # ── Skip x86_64 cross-arch on aarch64 runner ──
+            # x86_64 on ARM64 TCG is not viable — I/O port emulation has no ARM
+            # hardware equivalent.  Even OVMF + modern virtio + pc machine + HPET
+            # cannot boot within 300s (tested over 16 CI iterations).
+            # aarch64 on x86_64 works fine (~20s) — EDK2 uses 64-bit MMIO.
+            if [ "$VM_ARCH" != "$RUNNER_ARCH" ] && [ "$RUNNER_ARCH" = "aarch64" ]; then
+              echo "::warning::$VMNAME: skipping x86_64 on aarch64 (not viable — TCG I/O port bottleneck)"
+              SKIPPED=$((SKIPPED + 1))
+              TIMING_RESULTS="${TIMING_RESULTS}  ⊘ ${VMNAME}: skipped (x86_64 on aarch64)\n"
+              echo "::endgroup::"
+              continue
             fi
 
             # ── Clean stale files and start via qemu.sh ──
+            BOOT_START=$(date +%s)
             SERIAL_LOG="/tmp/qemu-${VMNAME}-serial.log"
             DEBUG_LOG="/tmp/qemu-${VMNAME}-debug.log"
             rm -f "/tmp/qemu-${VMNAME}.pid" "/tmp/qemu-${VMNAME}.log" \
@@ -297,6 +304,7 @@ jobs:
               echo "::error::$VMNAME: no PID file found"
               [ -n "$SOCAT_PID" ] && kill "$SOCAT_PID" 2>/dev/null || true
               FAILED=$((FAILED + 1))
+              TIMING_RESULTS="${TIMING_RESULTS}  ✗ ${VMNAME}: failed (no PID)\n"
               echo "::endgroup::"
               continue
             fi
@@ -306,6 +314,7 @@ jobs:
               cat "/tmp/qemu-${VMNAME}.log" 2>/dev/null | tail -30
               [ -n "$SOCAT_PID" ] && kill "$SOCAT_PID" 2>/dev/null || true
               FAILED=$((FAILED + 1))
+              TIMING_RESULTS="${TIMING_RESULTS}  ✗ ${VMNAME}: failed (QEMU exited)\n"
               echo "::endgroup::"
               continue
             fi
@@ -366,7 +375,8 @@ jobs:
                 break
               fi
               if curl -sS -m 3 --fail "http://localhost:${PORT}/" > /dev/null 2>&1; then
-                echo "  ✓ RouterOS HTTP up after $((i * POLL))s"
+                BOOT_ELAPSED=$(( $(date +%s) - BOOT_START ))
+                echo "  ✓ RouterOS HTTP up after ${BOOT_ELAPSED}s"
                 BOOTED=1
                 break
               fi
@@ -422,6 +432,7 @@ jobs:
               [ "$QEMU_PID" != "$PID" ] && kill "$PID" 2>/dev/null || true
               sleep 2
               FAILED=$((FAILED + 1))
+              TIMING_RESULTS="${TIMING_RESULTS}  ✗ ${VMNAME}: timeout $((TIMEOUT_ATTEMPTS * POLL))s (${EXPECTED_ACCEL})\n"
               echo "::endgroup::"
               continue
             fi
@@ -471,18 +482,22 @@ jobs:
 
             if [ "$API_OK" = "1" ]; then
               PASSED=$((PASSED + 1))
+              TIMING_RESULTS="${TIMING_RESULTS}  ✓ ${VMNAME}: ${BOOT_ELAPSED}s (${EXPECTED_ACCEL})\n"
               echo "  ✓ $VMNAME: ALL CHECKS PASSED"
             else
               FAILED=$((FAILED + 1))
+              TIMING_RESULTS="${TIMING_RESULTS}  ✗ ${VMNAME}: ${BOOT_ELAPSED}s (${EXPECTED_ACCEL}) — API failures\n"
               echo "  ✗ $VMNAME: SOME CHECKS FAILED"
             fi
             echo "::endgroup::"
           done
 
           echo ""
-          echo "═══════════════════════════════════════"
-          echo "Results on $RUNNER_ARCH runner: $PASSED passed, $FAILED failed"
-          echo "═══════════════════════════════════════"
+          echo "══════════════════════════════════════════════════════════"
+          echo "Boot timing — $RUNNER_ARCH runner ($PASSED passed, $FAILED failed, $SKIPPED skipped)"
+          echo "══════════════════════════════════════════════════════════"
+          printf "$TIMING_RESULTS"
+          echo "══════════════════════════════════════════════════════════"
           [ "$FAILED" -eq 0 ] || exit 1
 
       - name: Upload QEMU logs on failure

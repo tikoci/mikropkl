@@ -571,17 +571,29 @@ Common causes:
 - Wrong disk image path
 - Hardware acceleration not available and TCG failed to initialize
 
-### x86_64 cross-architecture boot on ARM64 host
+### x86_64 cross-architecture boot on ARM64 host (not viable)
 
-Running `qemu-system-x86_64` via TCG on an aarch64 host is significantly slower than any other combination due to x86 real-mode emulation overhead.  SeaBIOS on q35 performs PCIe initialization and exhaustive device probing (floppy, VGA, parallel port, USB) that is extremely slow under cross-arch TCG because ARM64 has no I/O port space equivalent.
+Running `qemu-system-x86_64` via TCG on an aarch64 host is **not viable**.  Over 16 CI
+iterations, progressively more aggressive optimizations were tried:
 
-`qemu.sh` automatically detects cross-arch and applies two mitigations:
-1. **`pc` (i440fx) machine type** instead of `q35` — simpler PIIX3 chipset, no PCIe
-2. **`-nodefaults`** — eliminates unnecessary device probing
+1. SeaBIOS + q35: ~199% CPU, zero serial output, 300s timeout
+2. OVMF + q35 + legacy virtio: timeout (I/O port BARs for disk access)
+3. OVMF + pc (i440fx) + modern virtio (`disable-legacy=on`): stuck in PIT timer calibration
+4. OVMF + pc + modern virtio + HPET: kernel advanced further (interrupts enabled) but still timed out at 300s
 
-UTM itself uses `-nodefaults -vga none` for its QEMU launches.  These changes do not affect the qemu.cfg on disk (which retains `q35` for native use); the cfg is sed-edited at launch.
+The root cause is pervasive x86 I/O port probing (`in`/`out` instructions at ports
+0x40-0x43, 0xCF8/0xCFC, 0xFED40000, etc.) during firmware and kernel init.  ARM64 has
+no I/O port space — each access traps to TCG software emulation with 20-50x overhead.
+No combination of machine type, firmware, or virtio mode can avoid this.
 
-If the VM still appears stuck (high CPU but no serial output), use the QEMU monitor socket to inspect:
+The reverse direction (aarch64 on x86_64) works fine — EDK2 UEFI uses 64-bit mode with
+MMIO throughout, and x86 hardware can emulate ARM MMIO efficiently (~20s boot).
+
+`qemu.sh` detects cross-arch x86-on-ARM64 and still applies mitigations (`pc` machine
+type, `-nodefaults`) in case someone wants to experiment, but the CI workflow skips
+these tests entirely.
+
+For cross-arch debugging, use the QEMU monitor socket:
 
 ```bash
 # Check where the vCPU is stuck (background mode)
@@ -622,10 +634,10 @@ Another process is using port 9180.  Either:
 
 | Machine | Host | Boot time | Notes |
 |---|---|---|---|
-| x86_64 (TCG) | any | ~30-60s | Software emulation |
-| aarch64 (TCG) | any | ~30-60s | Software emulation |
-| x86_64 (TCG) | aarch64 | ~40-120s | Cross-architecture emulation, highly variable |
-| aarch64 (TCG) | x86_64 | ~20-40s | Cross-architecture emulation |
+| x86_64 (TCG) | x86_64 | ~30-60s | Software emulation (same-arch, no KVM) |
+| aarch64 (TCG) | aarch64 | ~20s | Software emulation (same-arch, no KVM) |
+| aarch64 (TCG) | x86_64 | ~20s | Cross-architecture — works well (MMIO-based) |
+| x86_64 (TCG) | aarch64 | **not viable** | >300s — x86 I/O port bottleneck (see above) |
 
 **TCG Performance Tuning:**
 

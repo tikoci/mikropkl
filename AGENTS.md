@@ -106,12 +106,13 @@ Implemented in `Pkl/QemuCfg.pkl`.  Generates `qemu.cfg` (QEMU --readconfig ini) 
 - `qemu.sh` handles: UEFI pflash (aarch64), KVM/HVF/TCG detection, networking
   with port forwarding, display/serial config, `--background`/`--dry-run` modes
 - Makefile targets: `qemu-list`, `qemu-chmod`, `qemu-run`, `qemu-stop`
-- `qemu-test.yaml` CI workflow: both x86_64 and aarch64 runners test ALL machines
-  (native via KVM/TCG, cross-arch via TCG with 300s timeout).  Both runners verify
-  qemu.cfg ↔ config.pkl consistency.  Boot diagnostics log process state and CPU
-  usage during the wait loop.  QEMU debug logging (`-d guest_errors,unimp`) and
-  monitor socket (`info cpus`/`info registers` via socat) provide post-mortem data
-  on timeout.
+- `qemu-test.yaml` CI workflow: x86_64 runner boots ALL machines (x86 native via
+  KVM, aarch64 cross-arch via TCG ~20s); aarch64 runner boots only native aarch64
+  machines (x86 cross-arch abandoned after 16 CI iterations).  Both runners verify
+  qemu.cfg ↔ config.pkl consistency.  Boot timing summary displayed outside
+  `::group::` blocks for visibility.  QEMU debug logging (`-d guest_errors,unimp`)
+  and monitor socket (`info cpus`/`info registers` via socat) provide post-mortem
+  data on timeout.
 
 **Limitations documented in generated files:**
 - QEMU `--readconfig` cannot express: pflash drives, `-accel`, `-netdev user,hostfwd`,
@@ -241,9 +242,9 @@ repeated runs overwrite rather than accumulate, and `/tmp` is cleaned on reboot.
 different architecture.  Running `qemu-system-aarch64 -accel kvm` on an x86_64 host
 (or vice versa) crashes immediately.  `qemu.sh` gates KVM usage on
 `[ "$HOST_ARCH" = "<guest-arch>" ]` so cross-architecture guests always fall back to
-TCG.  Cross-arch TCG emulation is viable for CI — aarch64 CHR boots on an x86_64
-runner in ~20s, but x86_64 CHR on an ARM64 runner requires either OVMF (fast) or
-SeaBIOS with mitigations (slow).
+TCG.  Cross-arch TCG emulation: aarch64 CHR boots on an x86_64 runner in ~20s
+(EDK2 UEFI uses 64-bit MMIO); x86_64 on ARM64 is not viable (I/O port bottleneck,
+abandoned after 16 CI iterations — see decision log below).
 High CPU (~194%) during cross-arch TCG is normal and confirms active emulation.
 
 ### Why `.apple.` machine gets `qemu.cfg` + `qemu.sh` with OVMF
@@ -252,8 +253,14 @@ The `chr.x86_64.apple` bundle already contains the fat-chr image (proper FAT16 E
 partition).  It now also gets `qemu.cfg` + `qemu.sh` gated by
 `backend == "Apple" && architecture == "x86_64"` in `utmzip.pkl`.  Its `qemu.sh`
 uses OVMF (x86_64 UEFI firmware) instead of SeaBIOS, which starts in 64-bit mode
-with MMIO — no real-mode I/O port bottleneck.  This is the primary solution for
-CI cross-arch testing (x86_64 on ARM64 hosts).
+with MMIO — no real-mode I/O port bottleneck.  This enables the apple machine to be
+tested on native x86 runners via KVM (fastest boot: ~10s) alongside the SeaBIOS
+machines.
+
+**Note**: Cross-arch testing of x86_64 on ARM64 was attempted over 16 CI iterations
+using `pc` + OVMF + modern virtio + HPET, but the pervasive x86 I/O port probing
+(TPM at 0xFED40000, PIT at 0x40-0x43, ACPI, etc.) makes it not viable under ARM64 TCG.
+The apple machine's `qemu.cfg`/`qemu.sh` now serve primarily for native x86 testing.
 
 The apple machine's `qemu.cfg` uses the `pc` (i440fx) machine type instead of `q35`.
 The i440fx has a much simpler PCI topology than q35's ICH9/PCIe root complex — fewer
@@ -275,18 +282,24 @@ OVMF firmware paths searched (in order):
 - Linux: `/usr/share/OVMF/OVMF_CODE.fd`, `OVMF_CODE_4M.fd`, `/usr/share/edk2/x64/...`
 - Override: `QEMU_EFI_CODE` / `QEMU_EFI_VARS` environment variables
 
-### Why `.qemu.` SeaBIOS machines are skipped on ARM64
+### Why ALL x86_64 machines are skipped on ARM64 runner
 
-SeaBIOS q35 PCIe initialization plus default device probing (floppy, VGA, parallel
-port, USB) is extremely slow under cross-arch TCG — x86 real-mode I/O port emulation
-on ARM64 has no hardware equivalent (ARM uses MMIO exclusively).  The combination of
-q35's ICH9/PCIe topology and SeaBIOS's exhaustive device scan causes the guest to
-consume ~199% CPU for 5+ minutes without ever printing SeaBIOS's banner.
+x86_64 on ARM64 TCG is fundamentally not viable.  Over 16 CI iterations, progressively
+more aggressive optimizations were tried:
 
-The `.qemu.` machines keep SeaBIOS and q35 to match their UTM `config.plist` spec
-(standard MikroTik image, not fat-chr).  The CI workflow skips these machines with a
-`::warning::` annotation when `VM_ARCH != RUNNER_ARCH` and the backend is not Apple.
-The `.apple.` machine with OVMF + modern virtio provides the cross-arch x86_64 coverage.
+1. SeaBIOS + q35: 199% CPU, zero serial output, 300s timeout
+2. OVMF + q35 + legacy virtio: timeout (I/O port BARs)
+3. OVMF + pc + modern virtio (`disable-legacy=on`): stuck in PIT timer calibration
+4. OVMF + pc + modern virtio + HPET: kernel reached further (interrupts enabled,
+   new RIP), but still timed out at 300s
+
+The root cause is pervasive: x86 firmware and kernel probe legacy I/O ports during
+init (TPM at 0xFED40000, PIT at 0x40-0x43, ACPI PM at 0x600, etc.).  Each I/O port
+access traps to ARM TCG emulation with no hardware equivalent, causing 20-50x overhead.
+No combination of machine type, firmware, or virtio mode can avoid this.
+
+The CI workflow now skips ALL x86_64 machines on the aarch64 runner.  The x86_64 runner
+provides complete coverage: x86 native via KVM, aarch64 cross-arch via TCG.
 
 ### Why SLIRP networking (not bridge/tap)
 
