@@ -149,9 +149,10 @@ jobs:
             OK=1
 
             # Extract expected values from config.pkl (pkl PCF = source of truth)
-            # System.Target may not exist for Apple backend; derive from architecture
+            # System.Target may not exist for Apple backend; derive from architecture.
+            # Apple x86_64 uses "pc" (i440fx) in qemu.cfg for simpler PCI — faster cross-arch TCG.
             EXP_TARGET=$(pkl eval -x 'System.Target' "$CFG_PKL" 2>/dev/null \
-              || pkl eval -x 'if (System.Architecture == "aarch64") "virt" else "q35"' "$CFG_PKL")
+              || pkl eval -x 'if (System.Architecture == "aarch64") "virt" else "pc"' "$CFG_PKL")
             EXP_MEM=$(pkl eval -x 'System.MemorySize' "$CFG_PKL")
             EXP_CPUS=$(pkl eval -x 'if (System.CPUCount == 0) 1 else System.CPUCount' "$CFG_PKL")
             EXP_DRIVES=$(pkl eval -x 'Drive.toList().length' "$CFG_PKL")

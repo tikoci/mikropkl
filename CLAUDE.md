@@ -402,11 +402,13 @@ The reverse direction (aarch64 on x86_64 via TCG) works fine — boots in ~20s.
 
 1. **`.apple.` machine with OVMF + modern virtio** (primary solution for CI): The
    `chr.x86_64.apple` bundle has the fat-chr image (proper FAT16 EFI partition) and
-   gets `qemu.cfg` + `qemu.sh` with OVMF (x86_64 UEFI firmware).  Its `qemu.sh`
-   adds `-nodefaults` (skip unnecessary device enumeration) and
-   `-global virtio-blk-pci.disable-legacy=on` (force virtio-1.0 modern transport,
-   which uses MMIO BARs instead of I/O port BARs).  Both OVMF and Linux 5.6.3
-   support virtio-1.0 modern.  OVMF firmware paths searched:
+   gets `qemu.cfg` + `qemu.sh` with OVMF (x86_64 UEFI firmware).  Its `qemu.cfg`
+   uses the `pc` (i440fx) machine type instead of `q35` — the simpler PCI topology
+   dramatically reduces PCI config space I/O (ports 0xCF8/0xCFC) during OVMF boot.
+   Virtio devices use explicit `[device]` sections with `disable-legacy = "on"`
+   (force virtio-1.0 modern transport, MMIO BARs instead of I/O port BARs).
+   The launch script adds `-nodefaults` to skip unnecessary device enumeration.
+   Both OVMF and Linux 5.6.3 support virtio-1.0 modern.  OVMF firmware paths searched:
    - macOS: `/opt/homebrew/share/qemu/edk2-x86_64-code.fd` / `/usr/local/share/qemu/...`
    - Linux: `/usr/share/OVMF/OVMF_CODE.fd`, `OVMF_CODE_4M.fd`, `/usr/share/edk2/x64/...`
    - Override: `QEMU_EFI_CODE` / `QEMU_EFI_VARS` environment variables
@@ -557,7 +559,7 @@ run: |
 - KVM native: ~20s
 - TCG native: ~20–25s
 - TCG cross-arch (ARM on x86): ~20s
-- TCG cross-arch (x86 on ARM): **workaround applied** — `pc` + `-nodefaults` (see Known Limitations)
+- TCG cross-arch (x86 on ARM): `.apple.` machine with `pc` + OVMF + modern virtio (see Known Limitations)
 
 ## Development Toolchain (macOS Intel)
 

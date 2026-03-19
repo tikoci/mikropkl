@@ -255,11 +255,20 @@ uses OVMF (x86_64 UEFI firmware) instead of SeaBIOS, which starts in 64-bit mode
 with MMIO — no real-mode I/O port bottleneck.  This is the primary solution for
 CI cross-arch testing (x86_64 on ARM64 hosts).
 
-Additionally, `qemu.sh` passes `-nodefaults` (skip unnecessary device enumeration)
-and `-global virtio-blk-pci.disable-legacy=on` (force virtio-1.0 modern transport,
-which uses MMIO BARs instead of I/O port BARs).  Both OVMF and Linux 5.6.3
-support virtio-1.0 modern.  Without `disable-legacy`, even OVMF in 64-bit mode
-is bottlenecked by legacy virtio's I/O port BARs during disk reads on ARM64 TCG.
+The apple machine's `qemu.cfg` uses the `pc` (i440fx) machine type instead of `q35`.
+The i440fx has a much simpler PCI topology than q35's ICH9/PCIe root complex — fewer
+built-in devices, a single flat PCI bus instead of a PCIe hierarchy.  This dramatically
+reduces the number of PCI config space accesses (I/O ports 0xCF8/0xCFC) during OVMF
+boot, which is critical for cross-arch TCG where every I/O port operation is trapped.
+
+Virtio devices in `qemu.cfg` use explicit `[device]` sections with `disable-legacy = "on"`
+(force virtio-1.0 modern transport, MMIO BARs instead of I/O port BARs).  Both OVMF and
+Linux 5.6.3 support virtio-1.0 modern.  The launch script (`qemu.sh`) also passes
+`-nodefaults` to skip unnecessary device enumeration.
+
+There is no "faithfulness to config.plist" constraint for the apple machine's QEMU config —
+Apple VZ doesn't use QEMU at all.  The `qemu.cfg`/`qemu.sh` exist purely for cross-arch
+CI testing.
 
 OVMF firmware paths searched (in order):
 - macOS: `/opt/homebrew/share/qemu/edk2-x86_64-code.fd`, `/usr/local/share/qemu/...`

@@ -151,7 +151,8 @@ output {
           List(imageDownloadUrl.filename)
             + additionalDisks.mapIndexed((i, _e) -> "qdisk\(i).qcow2"),
           Randomish.macAddress(name, 0, "e"),
-          notes
+          notes,
+          false
         )
       }
       ["\(name).utm/qemu.sh"] {
@@ -181,7 +182,8 @@ output {
           List(imageDownloadUrl.filename)
             + additionalDisks.mapIndexed((i, _e) -> "qdisk\(i).qcow2"),
           Randomish.macAddress(name, 0, "e"),
-          notes
+          notes,
+          true
         )
       }
       ["\(name).utm/qemu.sh"] {
