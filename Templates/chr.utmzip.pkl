@@ -31,7 +31,7 @@ logoSvg = new CHR.Icon {
 // override the actual .plist, to set CPU to "cortex-a710" for CHR
 configPlist {
   System {
-    when (outer.architecture == "aarch64") {
+    when (outer.architecture == "aarch64" && outer.backend != "Apple") {
       CPU = "cortex-a710"
     }
   }

@@ -1,0 +1,10 @@
+amends "../Templates/chr.utmzip.pkl"
+import "../Pkl/CHR.pkl"
+
+backend = "Apple"
+architecture = "aarch64"
+
+logoSvg = new CHR.Icon { 
+    style = "solid"
+    fill = CHR.gray
+}

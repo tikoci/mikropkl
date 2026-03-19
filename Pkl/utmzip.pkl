@@ -172,7 +172,8 @@ output {
 
     // QEMU config for Apple x86_64: uses OVMF (UEFI) with the fat-chr image,
     // enabling cross-arch boot on ARM64 hosts where SeaBIOS is too slow.
-    when (backend == "Apple" && architecture == "x86_64" && qemuOutput) {
+    // For Apple aarach64, the native image is used.  Both get qemu.sh/.cfg for testing.
+    when (backend == "Apple" && qemuOutput) {
       ["\(name).utm/qemu.cfg"] {
         text = QemuCfg.config(
           name,
