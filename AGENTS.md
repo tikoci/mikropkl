@@ -101,7 +101,8 @@ Implemented in `Pkl/QemuCfg.pkl`.  Generates `qemu.cfg` (QEMU --readconfig ini) 
 - `QemuCfg.pkl` module with `config()` and `launchScript()` functions
 - `qemu.cfg` covers: `[machine]`, `[memory]`, `[smp-opts]`, `[drive]`, `[device]`
 - `qemu.sh` handles: UEFI pflash (aarch64), KVM/HVF/TCG detection, networking
-  with port forwarding, display/serial config, `--background`/`--dry-run` modes
+  with port forwarding, macOS vmnet (`--shared`/`--bridge`), display/serial config,
+  `--background`/`--dry-run`/`--stop` modes, optional `qemu.env` sourcing
 - Makefile targets: `qemu-list`, `qemu-chmod`, `qemu-run`, `qemu-stop`
 - `qemu-test.yaml` CI workflow: x86_64 runner boots ALL machines (x86 native via
   KVM, aarch64 cross-arch via TCG ~20s); aarch64 runner boots only native aarch64

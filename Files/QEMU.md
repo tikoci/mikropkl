@@ -123,7 +123,7 @@ Background mode writes the PID to `/tmp/qemu-<name>.pid` and provides Unix socke
 
 **Stop:**
 ```sh
-kill "$(cat /tmp/qemu-chr.x86_64.qemu.7.22.pid)"
+./qemu.sh --stop
 ```
 
 ### Dry-run (see the QEMU command without executing)
@@ -214,9 +214,10 @@ curl -u admin: http://localhost:9180/rest/system/resource | jq .version
 curl -u admin: http://localhost:9181/rest/system/resource | jq .version
 ```
 
-Stop all:
+Stop each:
 ```sh
-kill "$(cat /tmp/qemu-chr.x86_64.qemu.7.22.pid)" "$(cat /tmp/qemu-chr.x86_64.qemu.7.21.pid)"
+cd ~/Downloads/chr.x86_64.qemu.7.22.utm && ./qemu.sh --stop
+cd ~/Downloads/chr.x86_64.qemu.7.21.utm && ./qemu.sh --stop
 ```
 
 > [!TIP]
@@ -229,7 +230,8 @@ kill "$(cat /tmp/qemu-chr.x86_64.qemu.7.22.pid)" "$(cat /tmp/qemu-chr.x86_64.qem
 ```
 chr.x86_64.qemu.7.22.utm/
 ├── qemu.sh              ← Launch script (run this)
-├── qemu.cfg             ← QEMU machine definition (edit this)
+├── qemu.cfg             ← QEMU machine definition (edit this for hardware)
+├── qemu.env             ← Optional: persistent overrides (create this yourself)
 ├── config.plist         ← UTM configuration (ignore unless using UTM)
 └── Data/
     └── chr-7.22.img     ← RouterOS CHR disk image (128 MiB)
@@ -237,7 +239,7 @@ chr.x86_64.qemu.7.22.utm/
 
 ### `qemu.cfg` — the machine definition
 
-A standard QEMU [`--readconfig`](https://www.qemu.org/docs/master/system/invocation.html#hxtool-8) INI file.  This is where you change VM hardware — memory, CPUs, disks, NIC settings:
+A standard QEMU [`--readconfig`](https://www.qemu.org/docs/master/system/invocation.html#hxtool-8) INI file (see [QEMU invocation docs](https://www.qemu.org/docs/master/system/invocation.html)).  This is where you change VM hardware — memory, CPUs, disks, NIC settings:
 
 ```ini
 [machine]
@@ -262,11 +264,27 @@ A standard QEMU [`--readconfig`](https://www.qemu.org/docs/master/system/invocat
 
 **Editable.** Change memory, CPU count, or add drives directly in this file.  Paths are relative to the package directory.
 
+> [!NOTE]
+> **About the MAC address:** The `mac` line in `qemu.cfg` exists because these packages originate from UTM, whose `config.plist` requires an explicit MAC address.  For standalone QEMU use, this line is optional — QEMU auto-generates a unique MAC (from the `52:54:00:xx:xx:xx` range) if omitted.  You can safely remove or change it.  If you run multiple instances on the same bridge network, you **should** either remove or change the MAC to avoid conflicts, since all packages of the same version share the same generated value.
+
 ### `qemu.sh` — the launcher
 
 A POSIX shell script that wraps `qemu.cfg` with platform detection (KVM/HVF/TCG), networking, UEFI firmware (aarch64), and serial/display setup.  Things that QEMU's `--readconfig` format cannot express live here.
 
-In most cases, **edit `qemu.cfg` for hardware changes** and use `qemu.sh` flags or environment variables for runtime behavior.
+In most cases, **edit `qemu.cfg` for hardware changes** and use `qemu.sh` flags, environment variables, or a `qemu.env` file for runtime behavior.
+
+### `qemu.env` — persistent overrides (optional)
+
+Create a `qemu.env` file alongside `qemu.sh` to set persistent environment variable overrides without modifying any generated file.  `qemu.sh` sources it automatically if present:
+
+```sh
+# qemu.env — example overrides
+QEMU_PORT=9280
+QEMU_ACCEL=tcg
+QEMU_EXTRA="-m 2048"
+```
+
+Command-line flags (`--port`, `--shared`, etc.) take precedence over values in `qemu.env`.  The file is plain shell — any valid `VAR=value` assignment works.  This is the recommended way to persist per-machine settings like a custom port or alternate networking.
 
 ---
 
@@ -317,7 +335,7 @@ RouterOS will see it as an additional drive — format it from the CLI with `/di
 
 ## Networking
 
-The default configuration uses QEMU user-mode (SLIRP) networking with port forwarding.  This works without root privileges and is sufficient for management access.  Several alternatives exist for more advanced scenarios.
+The default configuration uses QEMU [user-mode (SLIRP)](https://www.qemu.org/docs/master/system/devices/net.html#using-the-user-mode-network-stack) networking with port forwarding.  This works without root privileges and is sufficient for management access.  Several alternatives exist for more advanced scenarios — see the [QEMU networking docs](https://www.qemu.org/docs/master/system/devices/net.html) for full details on each backend.
 
 ### Default: port forwarding (user-mode)
 
@@ -330,7 +348,7 @@ The default configuration uses QEMU user-mode (SLIRP) networking with port forwa
   mac = "0e:fe:a9:e7:24:09"
 ```
 
-The `netdev` in `qemu.cfg` references `net0`, which `qemu.sh` creates.  This separation exists because QEMU's `--readconfig` format does not support the `hostfwd=` option.
+The `netdev` in `qemu.cfg` references `net0`, which `qemu.sh` creates.  This separation exists because QEMU's `--readconfig` format does not support the `hostfwd=` option needed for port forwarding.
 
 ### Forwarding additional ports
 
@@ -354,9 +372,45 @@ QEMU_NETDEV="user,id=net0,hostfwd=tcp::9180-:80,hostfwd=tcp::9122-:22,hostfwd=tc
 > | API | 8728 | 9728 |
 > | API-SSL | 8729 | 9729 |
 
+### macOS networking (vmnet)
+
+macOS does not have kernel tap/tun support.  Instead, QEMU 8+ supports Apple's [`vmnet.framework`](https://developer.apple.com/documentation/vmnet), which provides shared (NAT) and bridged networking modes.  `qemu.sh` has built-in flags for both:
+
+**Shared networking (NAT):**
+```sh
+sudo ./qemu.sh --shared
+```
+
+Uses `vmnet-shared` — RouterOS gets an IP on a private NAT network (typically `192.168.64.x/24`).  The VM can reach the internet through macOS's NAT.  Requires `sudo` because `vmnet.framework` needs root.
+
+**Bridged networking:**
+```sh
+sudo ./qemu.sh --bridge en0
+```
+
+Uses `vmnet-bridged` on the specified interface *plus* `vmnet-shared` as a second NIC.  RouterOS sees two interfaces: `ether1` bridged to your physical LAN (gets a real LAN IP via DHCP or static config), and `ether2` on the private vmnet NAT.  This gives full LAN access while keeping a management path.  Requires `sudo`.
+
+> [!NOTE]
+> When `qemu.sh` runs as root on macOS without explicit networking flags, it defaults to `vmnet-shared` automatically (more useful than SLIRP under `sudo`).
+
+**Port forwarding is not used with vmnet.**  Access RouterOS by its vmnet IP address directly.  Find it via the serial console (`/ip address print`) or check your DHCP leases.
+
+Both modes work in foreground and background:
+```sh
+sudo ./qemu.sh --shared --background
+sudo ./qemu.sh --bridge en0 --background --port 9180
+# (--port is ignored with vmnet, but harmless)
+```
+
+> [!TIP]
+> If you only need management access (WebFig, SSH, REST API), the default user-mode networking with `--port` is simpler and does not require `sudo`.  Use vmnet when you need the CHR to participate on a real network — for example, testing DHCP server, OSPF, or BGP.
+
 ### Bridge networking (Linux)
 
 Bridge networking connects the VM directly to a host network — the CHR gets its own IP address on the LAN (or from DHCP).  This is essential for testing DHCP server, routing protocols, or any scenario where port forwarding is insufficient.
+
+> [!NOTE]
+> The commands below illustrate the general approach for Linux bridge + tap networking.  Adapt interface names, IP addresses, and routes to your environment.  See the [QEMU networking docs](https://www.qemu.org/docs/master/system/devices/net.html#using-tap-network-interfaces) for full tap/bridge details.
 
 **Setup:**
 ```sh
@@ -387,7 +441,10 @@ This replaces the user-mode netdev.  RouterOS will bridge onto your physical net
 
 ### Shared networking / NAT with a bridge (Linux)
 
-If you want multiple VMs to talk to each other *and* reach the internet, but don't want to bridge to a physical interface, create an isolated bridge with NAT:
+If you want multiple VMs to talk to each other *and* reach the internet, but don't want to bridge to a physical interface, create an isolated bridge with NAT.
+
+> [!NOTE]
+> This is a conceptual example showing the general pattern.  Interface names, subnets, and iptables rules will vary by distribution and existing network configuration.
 
 ```sh
 # Create an isolated bridge
@@ -422,7 +479,7 @@ Assign static IPs in each RouterOS instance (e.g. `10.99.0.2/24` and `10.99.0.3/
 
 ### Socket networking (inter-VM without root)
 
-QEMU socket networking lets two VMs communicate over a shared Unix socket — no root, no bridge, no tap:
+QEMU [socket networking](https://www.qemu.org/docs/master/system/devices/net.html#connecting-emulated-networks-between-qemu-instances) lets two VMs communicate over a shared Unix socket — no root, no bridge, no tap:
 
 ```sh
 # VM 1 (server side)
@@ -437,25 +494,6 @@ The two VMs share a virtual Ethernet segment.  Assign IPs manually in RouterOS a
 > [!NOTE]
 > Socket networking supports exactly two peers per socket.  For more than two VMs, combine with a QEMU multi-point socket (`mcast`) or use bridge/tap.
 
-### macOS networking considerations
-
-macOS does not have kernel tap/tun support by default.  Your options:
-
-- **User-mode (default):** Works out of the box.  Fine for management access via port forwarding.
-- **`vmnet-shared`:** QEMU 8+ supports `-netdev vmnet-shared,id=net0`, which uses macOS's `vmnet.framework` to provide a NAT'd network.  Requires running QEMU with `sudo` or appropriate entitlements.
-- **`vmnet-bridged`:** `-netdev vmnet-bridged,id=net0,ifname=en0` bridges to a physical interface.  Requires `sudo`.
-
-```sh
-# macOS shared networking (NAT, requires sudo)
-sudo QEMU_NETDEV="vmnet-shared,id=net0" ./qemu.sh
-
-# macOS bridged networking (direct LAN access, requires sudo)
-sudo QEMU_NETDEV="vmnet-bridged,id=net0,ifname=en0" ./qemu.sh
-```
-
-> [!IMPORTANT]
-> `vmnet` modes replace user-mode networking.  RouterOS gets a `vmnet` network IP (typically `192.168.64.x` for shared).  Port forwarding flags (`--port`) do not apply.
-
 ### Adding a second NIC
 
 To give RouterOS a WAN + LAN topology, add a second NIC in `qemu.cfg`:
@@ -464,7 +502,6 @@ To give RouterOS a WAN + LAN topology, add a second NIC in `qemu.cfg`:
 [device "nic1"]
   driver = "virtio-net-pci"
   netdev = "net1"
-  mac = "0e:00:00:00:00:02"
 ```
 
 Then provide the second netdev at launch:
@@ -481,7 +518,7 @@ RouterOS will see `ether1` (net0, management) and `ether2` (net1, your tap).  Co
 
 ## Environment Variables
 
-Override any default without editing files:
+Override any default without editing files.  For persistent per-machine overrides, put these in a `qemu.env` file alongside `qemu.sh` (see [What's Inside the Package](#whats-inside-the-package)).
 
 | Variable | Purpose | Example |
 |---|---|---|
@@ -497,7 +534,7 @@ Override any default without editing files:
 
 ## QEMU Monitor
 
-In background mode, the QEMU Human Monitor Protocol (HMP) is exposed on a Unix socket for diagnostics:
+In background mode, the QEMU [Human Monitor Protocol (HMP)](https://www.qemu.org/docs/master/system/monitor.html) is exposed on a Unix socket for diagnostics:
 
 ```sh
 # Interactive session
@@ -528,7 +565,7 @@ In foreground mode, press `Ctrl-A` then `C` to toggle between the serial console
 
 - **Machine type:** `virt`
 - **Firmware:** EDK2 UEFI — `qemu.sh` searches standard paths automatically (`/opt/homebrew/share/qemu/`, `/usr/local/share/qemu/`, `/usr/share/AAVMF/`)
-- **Disk:** Explicit `virtio-blk-pci` device in `qemu.cfg` (the `if=virtio` shorthand maps to VirtIO-MMIO on `virt`, which RouterOS lacks a driver for)
+- **Disk:** Explicit `virtio-blk-pci` device in `qemu.cfg` (the `if=virtio` shorthand maps to VirtIO-MMIO on `virt`, which RouterOS lacks a driver for — see [QEMU VirtIO docs](https://www.qemu.org/docs/master/system/devices/virtio-net.html))
 - **Boot time:** ~10–20s with KVM/HVF, ~20–30s with TCG
 - **Cross-arch:** aarch64 CHR boots on x86_64 hosts via TCG in ~20s — including macOS Intel
 

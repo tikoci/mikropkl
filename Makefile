@@ -289,11 +289,5 @@ qemu-run: qemu-chmod
 # Stop a running QEMU instance launched by qemu-run
 qemu-stop:
 	@test -n "$(QEMU_UTM)" || (echo "Set QEMU_UTM=<path to .utm dir>" && exit 1)
-	@VMNAME=$$(basename "$(QEMU_UTM)" .utm); \
-	  PID_FILE="/tmp/qemu-$$VMNAME.pid"; \
-	  if [ -f "$$PID_FILE" ]; then \
-	    kill "$$(cat $$PID_FILE)" 2>/dev/null && echo "Stopped $$VMNAME" || echo "$$VMNAME not running"; \
-	    rm -f "$$PID_FILE"; \
-	  else \
-	    echo "No PID file for $$VMNAME"; \
-	  fi
+	@test -f "$(QEMU_UTM)/qemu.sh" || (echo "No qemu.sh in $(QEMU_UTM)" && exit 1)
+	@sh "$(QEMU_UTM)/qemu.sh" --stop

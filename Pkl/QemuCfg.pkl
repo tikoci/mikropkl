@@ -137,15 +137,18 @@ function launchScript(
   # Usage:
   #   ./qemu.sh                     # foreground, serial on stdio
   #   ./qemu.sh --background        # background, serial to socket
+  #   ./qemu.sh --stop              # stop a backgrounded instance
   #   ./qemu.sh --port 9280         # custom host port (default: 9180)
+  #   ./qemu.sh --shared            # macOS: vmnet-shared NAT networking (requires sudo)
+  #   ./qemu.sh --bridge en0        # macOS: vmnet-bridged + shared (requires sudo)
   #   ./qemu.sh --dry-run           # print command without executing
   #
-  # Environment variables:
+  # Environment variables (also settable in qemu.env alongside this script):
   #   QEMU_BIN        — override qemu-system binary path
   #   QEMU_ACCEL      — override accelerator (kvm, hvf, tcg)
   #   QEMU_PORT       — override host port for RouterOS HTTP (default: 9180)
   #   QEMU_EXTRA      — additional QEMU arguments appended to command line
-  #   QEMU_NETDEV    — override netdev (replaces default user-mode networking)
+  #   QEMU_NETDEV     — override netdev (replaces default user-mode networking)
   \(if (needsUefi) "#   QEMU_EFI_CODE   — override UEFI code ROM path\n#   QEMU_EFI_VARS   — override UEFI vars template path" else "")
 
   set -eu
@@ -154,18 +157,52 @@ function launchScript(
   SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
   CFG_FILE="$SCRIPT_DIR/qemu.cfg"
 
+  # ── Source optional environment file ──
+  # Place a qemu.env file alongside this script to set persistent overrides
+  # (e.g. QEMU_PORT, QEMU_NETDEV, QEMU_EXTRA) without modifying qemu.sh.
+  # Command-line flags (--port, --shared, etc.) take precedence.
+  ENV_FILE="$SCRIPT_DIR/qemu.env"
+  if [ -f "$ENV_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$ENV_FILE"
+  fi
+
   # ── Parse arguments ──
   BACKGROUND=0
   DRY_RUN=0
+  STOP=0
+  SHARED=0
+  BRIDGE_IFACE=""
   PORT="${QEMU_PORT:-9180}"
   while [ $# -gt 0 ]; do
     case "$1" in
       --background) BACKGROUND=1; shift ;;
+      --stop)       STOP=1; shift ;;
+      --shared)     SHARED=1; shift ;;
+      --bridge)     BRIDGE_IFACE="$2"; shift 2 ;;
       --dry-run)    DRY_RUN=1; shift ;;
       --port)       PORT="$2"; shift 2 ;;
       *)            echo "Unknown option: $1" >&2; exit 1 ;;
     esac
   done
+
+  # ── Stop mode ──
+  if [ "$STOP" = "1" ]; then
+    PID_FILE="/tmp/qemu-\(vmName).pid"
+    if [ -f "$PID_FILE" ]; then
+      PID="$(cat "$PID_FILE")"
+      if kill "$PID" 2>/dev/null; then
+        echo "Stopped \(vmName) (PID $PID)"
+        rm -f "$PID_FILE"
+      else
+        echo "\(vmName) not running (stale PID file removed)"
+        rm -f "$PID_FILE"
+      fi
+    else
+      echo "No PID file for \(vmName) — not running or started without --background"
+    fi
+    exit 0
+  fi
 
   # ── Locate QEMU binary ──
   QEMU="${QEMU_BIN:-}"
@@ -343,9 +380,30 @@ function launchScript(
   # ── Networking ──
   # QEMU --readconfig can define [device] for the NIC but cannot define [netdev]
   # with hostfwd port forwarding (hostfwd is not a --readconfig-supported option).
-  # QEMU_NETDEV replaces the default user-mode networking entirely (for bridge/tap/vmnet).
+  # Precedence: QEMU_NETDEV > --bridge > --shared > auto-detect > user-mode.
   if [ -n "${QEMU_NETDEV:-}" ]; then
+    # Explicit QEMU_NETDEV override — use as-is
     NET_FLAGS="-netdev $QEMU_NETDEV"
+  elif [ -n "$BRIDGE_IFACE" ]; then
+    # --bridge <iface>: vmnet-bridged on net0, plus vmnet-shared on net1 (two NICs).
+    # Bridged gives LAN access; shared gives a private NAT for management.
+    # Requires macOS and root (vmnet.framework).
+    if [ "$(uname -s)" != "Darwin" ]; then
+      echo "ERROR: --bridge requires macOS vmnet.framework. On Linux, use QEMU_NETDEV with tap." >&2
+      exit 1
+    fi
+    NET_FLAGS="-netdev vmnet-bridged,id=net0,ifname=$BRIDGE_IFACE"
+    NET_FLAGS="$NET_FLAGS -netdev vmnet-shared,id=net1 -device virtio-net-pci,netdev=net1"
+  elif [ "$SHARED" = "1" ]; then
+    # --shared: vmnet-shared NAT (macOS vmnet.framework, requires root)
+    if [ "$(uname -s)" != "Darwin" ]; then
+      echo "ERROR: --shared requires macOS vmnet.framework. On Linux, use QEMU_NETDEV." >&2
+      exit 1
+    fi
+    NET_FLAGS="-netdev vmnet-shared,id=net0"
+  elif [ "$(uname -s)" = "Darwin" ] && [ "$(id -u)" = "0" ]; then
+    # Running as root on macOS — default to vmnet-shared (more useful than SLIRP)
+    NET_FLAGS="-netdev vmnet-shared,id=net0"
   else
     NET_FLAGS="-netdev user,id=net0,hostfwd=tcp::${PORT}-:80"
   fi
