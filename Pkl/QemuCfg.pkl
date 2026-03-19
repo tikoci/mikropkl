@@ -288,7 +288,12 @@ function launchScript(
   PFLASH_FLAGS="-drive if=pflash,format=raw,readonly=on,unit=0,file=$EFI_CODE"
   PFLASH_FLAGS="$PFLASH_FLAGS -drive if=pflash,format=raw,unit=1,file=$VARS_COPY"
   CPU_FLAGS=""
-  MISC_FLAGS=""
+  # -nodefaults: skip default floppy/VGA/USB (faster OVMF init, esp. cross-arch).
+  # -global disable-legacy=on: force virtio-1.0 modern transport (MMIO BARs).
+  #   Legacy virtio uses I/O port BARs — slow under cross-arch TCG on ARM64.
+  #   Modern virtio uses memory-mapped BARs — no I/O port trapping overhead.
+  #   Both OVMF and Linux 5.6.3 support virtio-1.0 modern.
+  MISC_FLAGS="-nodefaults -global virtio-blk-pci.disable-legacy=on -global virtio-net-pci.disable-legacy=on"
   """
   else
   """
@@ -297,24 +302,6 @@ function launchScript(
   PFLASH_FLAGS=""
   CPU_FLAGS=""
   MISC_FLAGS=""
-
-  # ── Cross-arch workaround: x86_64 on non-x86 hosts ──
-  # SeaBIOS q35 PCIe initialization plus default device probing (floppy, VGA,
-  # parallel port, USB) is extremely slow under cross-arch TCG — x86 real-mode
-  # I/O port emulation on ARM64 is much costlier than ARM MMIO on x86.
-  # Two mitigations:
-  #   1. pc (i440fx) machine type — simpler PIIX3 chipset, no PCIe topology
-  #   2. -nodefaults — skip device probing for floppy, parallel, VGA, USB, etc.
-  # The -serial flag still creates an ISA serial port despite -nodefaults.
-  # Note: UTM itself uses -nodefaults -vga none for its QEMU launch commands.
-  _XARCH="$(uname -m)"
-  if [ "$_XARCH" != "x86_64" ]; then
-    CROSS_CFG="/tmp/qemu-\(vmName)-cross.cfg"
-    sed 's/type = "q35"/type = "pc"/' "$CFG_FILE" > "$CROSS_CFG"
-    CFG_FILE="$CROSS_CFG"
-    MISC_FLAGS="-nodefaults"
-    echo "  Cross-arch: using pc machine type + -nodefaults (host=$_XARCH)"
-  fi
   """
   )
   # ── Networking ──

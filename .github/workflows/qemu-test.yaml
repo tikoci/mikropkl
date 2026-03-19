@@ -127,7 +127,7 @@ jobs:
             echo "KVM is available"
           else
             echo "KVM_AVAIL=0" >> $GITHUB_ENV
-            echo "::warning::KVM not available — native-arch machines will use TCG"
+            echo "::notice::KVM not available — machines will use TCG"
           fi
 
       - name: Make qemu.sh scripts executable
@@ -252,6 +252,18 @@ jobs:
             echo "  Config: arch=$VM_ARCH mem=${VM_MEM}M cpus=$VM_CPUS disks=$VM_DISKS"
             echo "  Runner: $RUNNER_ARCH, KVM=$KVM_AVAIL → expected accel=$EXPECTED_ACCEL"
             echo "  Port: $PORT, Timeout: $((TIMEOUT_ATTEMPTS * 5))s"
+
+            # ── Skip cross-arch SeaBIOS machines ──
+            # SeaBIOS x86_64 on ARM64 TCG is too slow (I/O port emulation).
+            # Only .apple. machines (OVMF) support cross-arch boot.
+            if [ "$VM_ARCH" != "$RUNNER_ARCH" ]; then
+              BACKEND=$(pkl eval -x 'Backend' "$CFG_PKL" 2>/dev/null || echo "QEMU")
+              if [ "$BACKEND" != "Apple" ]; then
+                echo "::warning::$VMNAME: skipping cross-arch SeaBIOS boot ($VM_ARCH on $RUNNER_ARCH)"
+                echo "::endgroup::"
+                continue
+              fi
+            fi
 
             # ── Clean stale files and start via qemu.sh ──
             SERIAL_LOG="/tmp/qemu-${VMNAME}-serial.log"

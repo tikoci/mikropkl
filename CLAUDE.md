@@ -390,34 +390,32 @@ actual QEMU process.  Consequences of missing `exec`:
 ### Cross-architecture TCG: x86_64 on aarch64 runner
 
 Running `qemu-system-x86_64` via TCG on an aarch64 host has a fundamental performance
-issue: SeaBIOS starts in 16-bit real mode using I/O port instructions (`in`/`out`), which
-ARM64 has no hardware equivalent for (ARM uses MMIO exclusively).  The cross-arch emulation
-overhead makes SeaBIOS q35 initialization + device probing extremely slow — typically
-consuming ~199% CPU for 300s with zero serial output.
+issue: x86 I/O port instructions (`in`/`out`) have no ARM hardware equivalent (ARM uses
+MMIO exclusively).  This affects both SeaBIOS (16-bit real-mode init) and legacy virtio
+(I/O port BARs for disk/network).  SeaBIOS q35 machines are unusable (~199% CPU, zero
+serial output, 300s timeout).  Even OVMF, which starts in 64-bit mode, is bottlenecked
+by legacy virtio's I/O port BARs during disk reads.
 
 The reverse direction (aarch64 on x86_64 via TCG) works fine — boots in ~20s.
-The asymmetry is because EDK2/UEFI starts in 64-bit mode with MMIO (simpler for TCG),
-while SeaBIOS starts in 16-bit real mode with I/O ports (complex for ARM64 TCG).
 
 **Two-pronged approach:**
 
-1. **`.apple.` machine with OVMF** (primary solution for CI): The `chr.x86_64.apple`
-   bundle already contains the fat-chr image (proper FAT16 EFI partition).  It now also
-   gets `qemu.cfg` + `qemu.sh` (gated by `backend == "Apple" && architecture == "x86_64"`
-   in `utmzip.pkl`).  Its `qemu.sh` uses OVMF (x86_64 UEFI firmware) instead of SeaBIOS,
-   which starts in 64-bit mode with MMIO — no real-mode I/O port bottleneck.  This boots
-   successfully on ARM64 hosts via TCG.  OVMF firmware paths searched:
+1. **`.apple.` machine with OVMF + modern virtio** (primary solution for CI): The
+   `chr.x86_64.apple` bundle has the fat-chr image (proper FAT16 EFI partition) and
+   gets `qemu.cfg` + `qemu.sh` with OVMF (x86_64 UEFI firmware).  Its `qemu.sh`
+   adds `-nodefaults` (skip unnecessary device enumeration) and
+   `-global virtio-blk-pci.disable-legacy=on` (force virtio-1.0 modern transport,
+   which uses MMIO BARs instead of I/O port BARs).  Both OVMF and Linux 5.6.3
+   support virtio-1.0 modern.  OVMF firmware paths searched:
    - macOS: `/opt/homebrew/share/qemu/edk2-x86_64-code.fd` / `/usr/local/share/qemu/...`
    - Linux: `/usr/share/OVMF/OVMF_CODE.fd`, `OVMF_CODE_4M.fd`, `/usr/share/edk2/x64/...`
    - Override: `QEMU_EFI_CODE` / `QEMU_EFI_VARS` environment variables
 
-2. **`.qemu.` machines with SeaBIOS** (best-effort on ARM64): The `.qemu.` machines
-   keep SeaBIOS to match their UTM `config.plist` spec (which uses the standard MikroTik
-   image, not fat-chr).  When `uname -m` is NOT `x86_64`, `qemu.sh` applies two
-   mitigations: **`pc` (i440fx)** instead of `q35` (simpler PIIX3 chipset, less
-   SeaBIOS init work), and **`-nodefaults`** (skips floppy/VGA/USB probing).  This
-   reduces boot time significantly but may still be slow under cross-arch TCG.
-   CI tolerates timeouts on SeaBIOS x86_64 machines running on ARM64 runners.
+2. **`.qemu.` machines with SeaBIOS** (skipped on ARM64): The `.qemu.` machines keep
+   SeaBIOS to match their UTM `config.plist` spec (standard MikroTik images, not
+   fat-chr).  Cross-arch SeaBIOS boot on ARM64 is not viable — the CI workflow skips
+   these machines with a `::warning::` annotation when `VM_ARCH != RUNNER_ARCH` and
+   the backend is not Apple.
 
 See `Lab/x86-cross-arch/NOTES.md` for the full investigation and test scripts.
 

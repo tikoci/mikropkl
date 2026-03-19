@@ -255,12 +255,18 @@ uses OVMF (x86_64 UEFI firmware) instead of SeaBIOS, which starts in 64-bit mode
 with MMIO — no real-mode I/O port bottleneck.  This is the primary solution for
 CI cross-arch testing (x86_64 on ARM64 hosts).
 
+Additionally, `qemu.sh` passes `-nodefaults` (skip unnecessary device enumeration)
+and `-global virtio-blk-pci.disable-legacy=on` (force virtio-1.0 modern transport,
+which uses MMIO BARs instead of I/O port BARs).  Both OVMF and Linux 5.6.3
+support virtio-1.0 modern.  Without `disable-legacy`, even OVMF in 64-bit mode
+is bottlenecked by legacy virtio's I/O port BARs during disk reads on ARM64 TCG.
+
 OVMF firmware paths searched (in order):
 - macOS: `/opt/homebrew/share/qemu/edk2-x86_64-code.fd`, `/usr/local/share/qemu/...`
 - Linux: `/usr/share/OVMF/OVMF_CODE.fd`, `OVMF_CODE_4M.fd`, `/usr/share/edk2/x64/...`
 - Override: `QEMU_EFI_CODE` / `QEMU_EFI_VARS` environment variables
 
-### Why `pc` + `-nodefaults` for SeaBIOS cross-arch x86_64 on ARM
+### Why `.qemu.` SeaBIOS machines are skipped on ARM64
 
 SeaBIOS q35 PCIe initialization plus default device probing (floppy, VGA, parallel
 port, USB) is extremely slow under cross-arch TCG — x86 real-mode I/O port emulation
@@ -268,19 +274,10 @@ on ARM64 has no hardware equivalent (ARM uses MMIO exclusively).  The combinatio
 q35's ICH9/PCIe topology and SeaBIOS's exhaustive device scan causes the guest to
 consume ~199% CPU for 5+ minutes without ever printing SeaBIOS's banner.
 
-`qemu.sh` detects `uname -m != x86_64` and applies two mitigations:
-1. **`pc` (i440fx)** instead of `q35` — simpler PIIX3 chipset, no PCIe topology.
-   The sed-edited qemu.cfg replaces `type = "q35"` with `type = "pc"` at launch.
-2. **`-nodefaults`** — eliminates floppy, parallel port, VGA, USB controller probing.
-   UTM itself uses `-nodefaults -vga none` in its QEMU launcher.
-
-RouterOS CHR doesn't depend on q35-specific features — `if=virtio` resolves to
-`virtio-blk-pci` on both `pc` and `q35`, and `virtio-net-pci` works identically.
-
-The `.qemu.` machines keep SeaBIOS to match their UTM `config.plist` spec (standard
-MikroTik image, not fat-chr).  CI tolerates timeouts on SeaBIOS x86_64 machines
-running on ARM64 runners — the `.apple.` machine with OVMF provides the cross-arch
-coverage.
+The `.qemu.` machines keep SeaBIOS and q35 to match their UTM `config.plist` spec
+(standard MikroTik image, not fat-chr).  The CI workflow skips these machines with a
+`::warning::` annotation when `VM_ARCH != RUNNER_ARCH` and the backend is not Apple.
+The `.apple.` machine with OVMF + modern virtio provides the cross-arch x86_64 coverage.
 
 ### Why SLIRP networking (not bridge/tap)
 
