@@ -42,8 +42,10 @@ jobs:
         uses: actions/checkout@v2
       - name: Install packages into building machine
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq unzip qemu-utils rsync gdisk dosfstools parted genisoimage zip make
+          echo "::group::apt-get install"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends unzip qemu-utils rsync gdisk dosfstools parted genisoimage zip make
+          echo "::endgroup::"
       - name: Intall Apple pkl-lang
         run: |
           curl -fsSL -o pkl 'https://github.com/apple/pkl/releases/download/${{ github.event.inputs.pklversion }}/pkl-linux-amd64'

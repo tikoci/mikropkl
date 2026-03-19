@@ -8,13 +8,14 @@
 # NOTE: No "partial" build - so a build will overwrite disks!
 #   Thus, while VMs will run from the /Machines directory, any changes will be lost on next `make`. 
 
-.PHONY: all prereq phase1 phase2 pkl clean 
+.PHONY: all prereq phase1 phase2 pkl clean distclean
 .SUFFIXES: 
 
 # basic build "from" and "to" here...
 PKL_RUN_DIR := Manifests
 PKL_OUTPUT_DIR := Machines
 PKL_FILES_DIR := Files
+CACHE_DIR := .url-cache
 
 # machine specific properties
 CHR_VERSION ?= stable
@@ -36,6 +37,10 @@ clean:
 	$(info cleaning $(PKL_OUTPUT_DIR))
 	rm -rf ./$(PKL_OUTPUT_DIR)
 
+distclean: clean
+	$(info cleaning $(CACHE_DIR))
+	rm -rf ./$(CACHE_DIR)
+
 # pkl creates the initial files /Manifasts to kickstart a UTM ZIP
 phase1: pkl
 	$(info ran build phase1)
@@ -52,16 +57,48 @@ pkl:
 #         doing the heavy lifting to download, unzip, or run commands.
 
 # pattern rules run the show
+# Downloads are cached in $(CACHE_DIR)/ keyed by <sha1-prefix>-<zip-basename>.
+# On cache hit the download is skipped.  "make clean" preserves the cache;
+# "make distclean" removes it.
 %.raw: %.raw.url
-	wget -q -O $@ `cat $<`
+	@URL=$$(cat $<); \
+	HASH=$$(printf '%s' "$$URL" | shasum | cut -c1-12); \
+	CACHED="$(CACHE_DIR)/$$HASH-$$(basename "$$URL")"; \
+	mkdir -p "$(CACHE_DIR)"; \
+	if [ -f "$$CACHED" ]; then \
+	  echo "url-cache hit: $$(basename "$$URL")"; \
+	else \
+	  echo "url-cache miss: $$(basename "$$URL")"; \
+	  wget -q -O "$$CACHED.tmp" "$$URL" && mv "$$CACHED.tmp" "$$CACHED" \
+	    || { rm -f "$$CACHED.tmp"; exit 1; }; \
+	fi; \
+	cp "$$CACHED" $@
 %.img: %.img.zip.url
-	wget -q -O $@.zip `cat $<`
-	unzip -o $(subst .url,,$<) -d $(dir $@)
-	rm $(subst .url,,$<)
+	@URL=$$(cat $<); \
+	HASH=$$(printf '%s' "$$URL" | shasum | cut -c1-12); \
+	CACHED="$(CACHE_DIR)/$$HASH-$$(basename "$$URL")"; \
+	mkdir -p "$(CACHE_DIR)"; \
+	if [ -f "$$CACHED" ]; then \
+	  echo "url-cache hit: $$(basename "$$URL")"; \
+	else \
+	  echo "url-cache miss: $$(basename "$$URL")"; \
+	  wget -q -O "$$CACHED.tmp" "$$URL" && mv "$$CACHED.tmp" "$$CACHED" \
+	    || { rm -f "$$CACHED.tmp"; exit 1; }; \
+	fi; \
+	unzip -o -q "$$CACHED" -d $(dir $@)
 %.qcow2: %.qcow2.zip.url
-	wget -q -O $@.zip `cat $<`
-	unzip -o $(subst .url,,$<) -d $(dir $@)
-	rm $(subst .url,,$<)
+	@URL=$$(cat $<); \
+	HASH=$$(printf '%s' "$$URL" | shasum | cut -c1-12); \
+	CACHED="$(CACHE_DIR)/$$HASH-$$(basename "$$URL")"; \
+	mkdir -p "$(CACHE_DIR)"; \
+	if [ -f "$$CACHED" ]; then \
+	  echo "url-cache hit: $$(basename "$$URL")"; \
+	else \
+	  echo "url-cache miss: $$(basename "$$URL")"; \
+	  wget -q -O "$$CACHED.tmp" "$$URL" && mv "$$CACHED.tmp" "$$CACHED" \
+	    || { rm -f "$$CACHED.tmp"; exit 1; }; \
+	fi; \
+	unzip -o -q "$$CACHED" -d $(dir $@)
 %.qcow2: %.size
 	qemu-img create -f qcow2 $@ `cat $<`M
 %: %.localcp

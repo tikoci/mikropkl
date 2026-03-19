@@ -1,4 +1,5 @@
 Machines
+.url-cache
 .DS_Store
 Lab/**/*.img
 Lab/**/*.vdi

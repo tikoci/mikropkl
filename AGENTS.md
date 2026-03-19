@@ -268,6 +268,29 @@ RouterOS CHR doesn't depend on q35-specific features — `if=virtio` resolves to
 configuration.  Good enough for CI testing where we just need HTTP access.  The
 trade-off is no port forwarding in libvirt XML — we add it via QEMU command line.
 
+### Why `.url-cache/` with SHA1-keyed filenames
+
+Multiple machines reference the same CHR download URL (e.g. every x86_64 QEMU machine
+uses `chr-7.22.img.zip`).  Without caching, `make clean && make` re-downloads identical
+images for each machine.  CHR images never change once a version is released.
+
+Cache key is `<sha1-prefix>-<zip-basename>` where the SHA1 is computed from the full
+URL string.  This avoids collisions between different sources that use the same zip
+filename (e.g. `download.mikrotik.com/.../chr-7.22.img.zip` vs
+`github.com/tikoci/fat-chr/.../chr-7.22.img.zip`).
+
+Downloads use `*.tmp` + atomic `mv` to prevent corrupt cache entries from interrupted
+downloads.  `make clean` preserves the cache; `make distclean` removes it.
+
+### Why `::group::` + `-qq` + `--no-install-recommends` for apt-get in CI
+
+`-q` (single) is still quite verbose — dpkg extraction messages flood the build log.
+`-qq` suppresses nearly all output; `--no-install-recommends` avoids pulling in
+unnecessary packages (faster, less log noise); `DEBIAN_FRONTEND=noninteractive`
+prevents debconf prompts that hang CI.  `::group::` / `::endgroup::` collapses
+any remaining output in the GitHub Actions log viewer so it doesn't obscure the
+actual build and test output.
+
 ## Useful Commands for Image Analysis
 
 These are one-off commands useful when debugging disk images or boot issues.

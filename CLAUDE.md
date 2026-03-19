@@ -199,13 +199,28 @@ The Makefile runs in **two recursive phases**:
    - Optionally emits `libvirt.xml` (QEMU machines only, disabled by default — enable with `LIBVIRT_OUTPUT=true`) with `/LIBVIRT_DATA_PATH/` sentinel
 
 2. **`make phase2`** → resolves placeholders:
-   - `*.img.zip.url` → `wget` + `unzip` → raw `.img` disk
+   - `*.img.zip.url` → `wget` + `unzip` → raw `.img` disk (cached in `.url-cache/`)
    - `*.size` → `qemu-img create -f qcow2`
    - `*.localcp` → `cp` from `Files/`
    - `libvirt-fixpaths` → replaces `/LIBVIRT_DATA_PATH/` sentinel with real absolute paths
    - `qemu-chmod` → makes `qemu.sh` scripts executable
 
 Running `make` triggers `phase1` then recursively calls `make phase2`.
+
+### Download caching (`.url-cache/`)
+
+Phase 2 download rules cache fetched archives in `.url-cache/` keyed by
+`<sha1-prefix>-<zip-basename>`.  Multiple machines that reference the same URL
+(e.g. every x86_64 QEMU machine downloads `chr-7.22.img.zip`) share one cached
+copy — the image is `unzip`/`cp`'d from cache into each machine's `Data/` directory.
+
+- `make clean` removes `Machines/` but **preserves** `.url-cache/` — rebuilds
+  reuse previously downloaded images.
+- `make distclean` removes both `Machines/` and `.url-cache/`.
+- `.url-cache/` is gitignored.  CI starts fresh (no cache), but local rebuilds
+  skip downloads entirely when the version hasn't changed.
+- Partial downloads are written to `*.tmp` and atomically renamed on success,
+  so an interrupted download leaves no corrupt cache entry.
 
 ## pkl Module Relationships
 
@@ -406,7 +421,8 @@ while SeaBIOS starts in 16-bit real mode with I/O ports (complex for ARM64 TCG).
 - **Running `pkl eval` without `CHR_VERSION` env**: defaults to "stable" channel.
   Always set `CHR_VERSION=<version>` for reproducible builds.
 - **Partial build / stale Machines/**: `pkl` always writes all output files.  Run
-  `make clean` before builds if you need a pristine state.
+  `make clean` before builds if you need a pristine state.  Use `make distclean`
+  to also purge the download cache (`.url-cache/`).
 - **libvirt-fixpaths writes absolute paths**: If you move the `Machines/` directory,
   re-run `make libvirt-fixpaths` or re-run `make` from scratch.
 - **qemu.cfg uses relative paths**: Disk paths in `qemu.cfg` are relative (`./Data/...`).
@@ -424,8 +440,11 @@ while SeaBIOS starts in 16-bit real mode with I/O ports (complex for ARM64 TCG).
 # Full build (all machines — qemu.cfg + qemu.sh enabled, libvirt.xml disabled)
 make
 
-# Clean + rebuild
+# Clean + rebuild (reuses cached downloads)
 make clean && make CHR_VERSION=7.22
+
+# Full clean including download cache
+make distclean && make CHR_VERSION=7.22
 
 # Enable libvirt.xml output alongside QEMU scripts
 LIBVIRT_OUTPUT=true make CHR_VERSION=7.22
@@ -485,6 +504,27 @@ Similar structure to `libvirt-test.yaml`: build job + 2 test jobs (x86_64 + aarc
 #### Package installation
 - Both runners install both architectures: `qemu-system-x86`, `qemu-system-arm`,
   `qemu-efi-aarch64` — every runner boots ALL machines (native + cross-arch via TCG)
+
+#### CI conventions for `apt-get` and downloads
+
+**`apt-get` pattern** (all workflows):
+```yaml
+run: |
+  echo "::group::apt-get install"
+  sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends PKG1 PKG2
+  echo "::endgroup::"
+```
+- `DEBIAN_FRONTEND=noninteractive` — prevents dpkg prompts and debconf timeouts
+- `-qq` — suppresses progress output (quieter than `-q`)
+- `--no-install-recommends` — minimizes packages, faster install, smaller log
+- `::group::` / `::endgroup::` — collapses output in GitHub Actions UI
+
+**`curl` download pattern**: `curl -fsSL -o FILE URL`
+- `-f` fail on HTTP error, `-s` silent, `-S` show errors, `-L` follow redirects
+
+**`wget` download pattern** (Makefile): `wget -q -O FILE URL`
+- `-q` quiet mode (no progress bar), `-O` output to specific file
 
 #### Key differences from libvirt-test.yaml
 - Uses `qemu.sh --background --port $PORT` instead of raw QEMU commands

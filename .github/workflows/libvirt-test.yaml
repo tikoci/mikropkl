@@ -42,8 +42,10 @@ jobs:
         # qemu-utils provides qemu-img (needed by make phase2 for extra disks)
         # wget for image downloads, libxml2-utils for xmllint, jq for JSON output
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-utils wget libxml2-utils make unzip zip jq
+          echo "::group::apt-get install"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends qemu-utils wget libxml2-utils make unzip zip jq
+          echo "::endgroup::"
 
       - name: Install Apple pkl
         run: |
@@ -114,12 +116,14 @@ jobs:
 
       - name: Install QEMU and XML tools
         run: |
-          sudo apt-get update -qq
+          echo "::group::apt-get install"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
           if echo "${{ matrix.machine }}" | grep -q 'aarch64'; then
-            sudo apt-get install -y -qq qemu-system-arm qemu-efi-aarch64 libxml2-utils
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends qemu-system-arm qemu-efi-aarch64 libxml2-utils
           else
-            sudo apt-get install -y -qq qemu-system-x86 libxml2-utils
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends qemu-system-x86 libxml2-utils
           fi
+          echo "::endgroup::"
 
       - name: Enable KVM
         # Apply udev rules first (required to make /dev/kvm user-accessible),
