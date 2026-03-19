@@ -258,6 +258,13 @@ function launchScript(
   PFLASH_FLAGS="-drive if=pflash,format=raw,readonly=on,unit=0,file=$EFI_CODE"
   PFLASH_FLAGS="$PFLASH_FLAGS -drive if=pflash,format=raw,unit=1,file=$VARS_COPY"
   CPU_FLAGS="-cpu cortex-a710"
+  # HVF on macOS uses the host CPU directly via Hypervisor.framework.
+  # cortex-a710 is ARMv9.0 (requires SVE2); Apple M-series is ARMv8.5/8.6 and
+  # does not expose SVE2 via HVF, causing QEMU to crash during CPU init.
+  # Override to -cpu host so QEMU uses the actual host CPU feature set.
+  if [ "$ACCEL" = "hvf" ]; then
+    CPU_FLAGS="-cpu host"
+  fi
   MISC_FLAGS="-vga none"
   """
   else if (useUefi)

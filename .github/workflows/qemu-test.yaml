@@ -338,15 +338,12 @@ jobs:
             # ── Start serial capture immediately (socat in background) ──
             # The serial chardev socket doesn't buffer historical output, so we
             # must connect from the start to see SeaBIOS/UEFI and kernel messages.
+            # retry=10,interval=1: handles the race where QEMU has bind()ed the socket
+            # file but not yet listen()ed — common on macOS/HVF due to startup lag.
             SERIAL_SOCK="/tmp/qemu-${VMNAME}-serial.sock"
-            SOCAT_PID=""
-            if [ -S "$SERIAL_SOCK" ]; then
-              socat -u UNIX-CONNECT:"$SERIAL_SOCK" "CREATE:$SERIAL_LOG" &
-              SOCAT_PID=$!
-              echo "  Serial capture PID=$SOCAT_PID → $SERIAL_LOG"
-            else
-              echo "  ⚠ Serial socket not yet available for capture"
-            fi
+            socat -u "UNIX-CONNECT:${SERIAL_SOCK},retry=10,interval=1" "CREATE:$SERIAL_LOG" &
+            SOCAT_PID=$!
+            echo "  Serial capture PID=$SOCAT_PID → $SERIAL_LOG"
             sleep 3
 
             PID_FILE="/tmp/qemu-${VMNAME}.pid"
