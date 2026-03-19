@@ -85,21 +85,8 @@ jobs:
     needs: build
     name: "test (${{ matrix.runner }})"
     strategy:
-      matrix:
-        include:
-          - runner: ubuntu-latest
-            runner-arch: x86_64
-            pkl-binary: pkl-linux-amd64
-          - runner: ubuntu-24.04-arm
-            runner-arch: aarch64
-            pkl-binary: pkl-linux-aarch64
-          - runner: macos-15
-            runner-arch: aarch64
-            pkl-binary: pkl-macos-aarch64
+      matrix: ${{ fromJSON(inputs.macos && '{"include":[{"runner":"ubuntu-latest","runner-arch":"x86_64","pkl-binary":"pkl-linux-amd64"},{"runner":"ubuntu-24.04-arm","runner-arch":"aarch64","pkl-binary":"pkl-linux-aarch64"},{"runner":"macos-15","runner-arch":"aarch64","pkl-binary":"pkl-macos-aarch64"}]}' || '{"include":[{"runner":"ubuntu-latest","runner-arch":"x86_64","pkl-binary":"pkl-linux-amd64"},{"runner":"ubuntu-24.04-arm","runner-arch":"aarch64","pkl-binary":"pkl-linux-aarch64"}]}') }}
       fail-fast: false
-
-    # Skip macOS runner unless explicitly requested via dispatch input
-    if: matrix.runner != 'macos-15' || inputs.macos
 
     runs-on: ${{ matrix.runner }}
 
