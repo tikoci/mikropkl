@@ -309,6 +309,25 @@ The `cortex-a710` model is preserved for TCG (cross-arch on x86_64 runner) and K
 **Secondary fix**: the workflow's socat serial capture now uses `retry=10,interval=1`
 so it handles the race window between QEMU calling `bind()` and `listen()`.
 
+### Why `sysctl kern.hv_support` check before selecting HVF
+
+GitHub Actions `macos-15` runners are VMs on Apple Silicon — nested Hypervisor.framework
+is not supported.  The previous `qemu.sh` detection logic assumed HVF was available on any
+macOS host where `uname -m` = `arm64`, causing QEMU to crash with:
+
+```
+qemu-system-aarch64: -accel hvf: Error: ret = HV_UNSUPPORTED (0xfae9400f, at ../target/arm/hvf/hvf.c:843)
+```
+
+The `HV_UNSUPPORTED` error occurs during `hv_vm_create()` / `hv_vcpu_create()` in QEMU's
+ARM HVF backend — the Hypervisor.framework API is present in the OS but the underlying
+hardware virtualization support is not exposed to the VM guest.
+
+**Fix**: `qemu.sh` now checks `sysctl -n kern.hv_support` (returns 1 if available, 0
+otherwise) before selecting HVF.  When HVF is not available, it falls back to TCG.
+The workflow's `Set accelerator info (macOS)` step also exports `HV_SUPPORT` for the
+boot-test expected-accel calculation.
+
 ### Why ALL x86_64 machines are skipped on ARM64 runner
 
 x86_64 on ARM64 TCG is fundamentally not viable.  Over 16 CI iterations, progressively

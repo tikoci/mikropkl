@@ -151,7 +151,13 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           echo "KVM_AVAIL=0" >> $GITHUB_ENV
-          echo "Using Hypervisor.framework (HVF) for native-arch guests, TCG for cross-arch"
+          HV_SUPPORT=$(sysctl -n kern.hv_support 2>/dev/null || echo 0)
+          echo "HV_SUPPORT=$HV_SUPPORT" >> $GITHUB_ENV
+          if [ "$HV_SUPPORT" = "1" ]; then
+            echo "Using Hypervisor.framework (HVF) for native-arch guests, TCG for cross-arch"
+          else
+            echo "::notice::HVF not available (kern.hv_support=$HV_SUPPORT) — all machines will use TCG"
+          fi
 
       - name: Make qemu.sh scripts executable
         run: make qemu-chmod
@@ -285,8 +291,8 @@ jobs:
             VM_DISKS=$(pkl eval -x 'Drive.toList().length' "$CFG_PKL")
 
             # ── Determine expected accelerator ──
-            # HVF on macOS native-arch, KVM on Linux native-arch, TCG for cross-arch
-            if [ "$VM_ARCH" = "$HOST_ARCH_NORM" ] && [ "$OS_TYPE" = "Darwin" ]; then
+            # HVF on macOS native-arch (if kern.hv_support=1), KVM on Linux native-arch, TCG for cross-arch
+            if [ "$VM_ARCH" = "$HOST_ARCH_NORM" ] && [ "$OS_TYPE" = "Darwin" ] && [ "${HV_SUPPORT:-0}" = "1" ]; then
               EXPECTED_ACCEL="hvf"
             elif [ "$VM_ARCH" = "$HOST_ARCH_NORM" ] && [ "$KVM_AVAIL" = "1" ]; then
               EXPECTED_ACCEL="kvm"

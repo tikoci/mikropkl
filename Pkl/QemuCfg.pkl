@@ -193,11 +193,13 @@ function launchScript(
         fi
         ;;
       Darwin)
-        # macOS: HVF only works natively (x86 on Intel, ARM on Apple Silicon)
-        # Fall back to TCG for cross-architecture emulation
-        if [ "$HOST_ARCH" = "x86_64" ] && [ "\(archBin)" = "x86_64" ]; then
+        # macOS: HVF requires Hypervisor.framework support (kern.hv_support=1).
+        # GitHub Actions macOS runners are VMs without nested virtualization,
+        # so HVF may not be available even on Apple Silicon hosts.
+        HV_SUPPORT=$(sysctl -n kern.hv_support 2>/dev/null || echo 0)
+        if [ "$HV_SUPPORT" = "1" ] && [ "$HOST_ARCH" = "x86_64" ] && [ "\(archBin)" = "x86_64" ]; then
           ACCEL="hvf"
-        elif [ "$HOST_ARCH" = "arm64" ] && [ "\(archBin)" = "aarch64" ]; then
+        elif [ "$HV_SUPPORT" = "1" ] && [ "$HOST_ARCH" = "arm64" ] && [ "\(archBin)" = "aarch64" ]; then
           ACCEL="hvf"
         else
           ACCEL="tcg,tb-size=256"
