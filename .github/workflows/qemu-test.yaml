@@ -118,7 +118,7 @@ jobs:
       - name: Install QEMU and tools (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install qemu socat
+          brew install qemu socat pkl
 
       - name: Log QEMU versions
         run: |
@@ -126,7 +126,8 @@ jobs:
           qemu-system-aarch64 --version 2>/dev/null || echo "qemu-system-aarch64 not installed"
           uname -m
 
-      - name: Install Apple pkl
+      - name: Install Apple pkl (Linux)
+        if: runner.os == 'Linux'
         run: |
           curl -fsSL -o pkl "https://github.com/apple/pkl/releases/download/${{ inputs.pklversion }}/${{ matrix.pkl-binary }}"
           chmod +x pkl && sudo cp pkl /usr/local/bin/pkl
