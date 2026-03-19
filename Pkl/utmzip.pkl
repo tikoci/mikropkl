@@ -163,7 +163,38 @@ output {
           List(imageDownloadUrl.filename)
             + additionalDisks.mapIndexed((i, _e) -> "qdisk\(i).qcow2"),
           Randomish.macAddress(name, 0, "e"),
+          notes,
+          false
+        )
+      }
+    }
+
+    // QEMU config for Apple x86_64: uses OVMF (UEFI) with the fat-chr image,
+    // enabling cross-arch boot on ARM64 hosts where SeaBIOS is too slow.
+    when (backend == "Apple" && architecture == "x86_64" && qemuOutput) {
+      ["\(name).utm/qemu.cfg"] {
+        text = QemuCfg.config(
+          name,
+          architecture,
+          memory.toUnit("mib").value.toInt(),
+          if (cpus == 0) 1 else cpus,
+          List(imageDownloadUrl.filename)
+            + additionalDisks.mapIndexed((i, _e) -> "qdisk\(i).qcow2"),
+          Randomish.macAddress(name, 0, "e"),
           notes
+        )
+      }
+      ["\(name).utm/qemu.sh"] {
+        text = QemuCfg.launchScript(
+          name,
+          architecture,
+          memory.toUnit("mib").value.toInt(),
+          if (cpus == 0) 1 else cpus,
+          List(imageDownloadUrl.filename)
+            + additionalDisks.mapIndexed((i, _e) -> "qdisk\(i).qcow2"),
+          Randomish.macAddress(name, 0, "e"),
+          notes,
+          true
         )
       }
     }

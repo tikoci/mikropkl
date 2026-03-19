@@ -102,7 +102,7 @@ jobs:
         run: |
           echo "::group::apt-get install"
           sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends qemu-system-x86 qemu-system-arm qemu-efi-aarch64 jq python3 socat
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends qemu-system-x86 qemu-system-arm qemu-efi-aarch64 ovmf jq python3 socat
           echo "::endgroup::"
 
       - name: Log QEMU versions
@@ -149,7 +149,9 @@ jobs:
             OK=1
 
             # Extract expected values from config.pkl (pkl PCF = source of truth)
-            EXP_TARGET=$(pkl eval -x 'System.Target' "$CFG_PKL")
+            # System.Target may not exist for Apple backend; derive from architecture
+            EXP_TARGET=$(pkl eval -x 'System.Target' "$CFG_PKL" 2>/dev/null \
+              || pkl eval -x 'if (System.Architecture == "aarch64") "virt" else "q35"' "$CFG_PKL")
             EXP_MEM=$(pkl eval -x 'System.MemorySize' "$CFG_PKL")
             EXP_CPUS=$(pkl eval -x 'if (System.CPUCount == 0) 1 else System.CPUCount' "$CFG_PKL")
             EXP_DRIVES=$(pkl eval -x 'Drive.toList().length' "$CFG_PKL")
@@ -324,12 +326,13 @@ jobs:
               echo "  ::warning::$VMNAME: expected accel=$EXPECTED_ACCEL, got=$ACTUAL_ACCEL"
             fi
 
-            # pflash for aarch64
-            if [ "$VM_ARCH" = "aarch64" ]; then
+            # pflash for UEFI machines (aarch64 always, Apple x86_64 uses OVMF)
+            BACKEND=$(pkl eval -x 'Backend' "$CFG_PKL" 2>/dev/null || echo "QEMU")
+            if [ "$VM_ARCH" = "aarch64" ] || [ "$BACKEND" = "Apple" ]; then
               if echo "$CMDLINE" | grep -q "pflash"; then
                 echo "  ✓ UEFI pflash present"
               else
-                echo "  ::error::$VMNAME: missing pflash for aarch64"
+                echo "  ::error::$VMNAME: missing pflash for UEFI machine"
               fi
             fi
 

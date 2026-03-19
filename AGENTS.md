@@ -242,10 +242,25 @@ different architecture.  Running `qemu-system-aarch64 -accel kvm` on an x86_64 h
 (or vice versa) crashes immediately.  `qemu.sh` gates KVM usage on
 `[ "$HOST_ARCH" = "<guest-arch>" ]` so cross-architecture guests always fall back to
 TCG.  Cross-arch TCG emulation is viable for CI — aarch64 CHR boots on an x86_64
-runner in ~20s, but x86_64 CHR on an ARM64 runner required workarounds (see below).
+runner in ~20s, but x86_64 CHR on an ARM64 runner requires either OVMF (fast) or
+SeaBIOS with mitigations (slow).
 High CPU (~194%) during cross-arch TCG is normal and confirms active emulation.
 
-### Why `pc` + `-nodefaults` for cross-arch x86_64 on ARM
+### Why `.apple.` machine gets `qemu.cfg` + `qemu.sh` with OVMF
+
+The `chr.x86_64.apple` bundle already contains the fat-chr image (proper FAT16 EFI
+partition).  It now also gets `qemu.cfg` + `qemu.sh` gated by
+`backend == "Apple" && architecture == "x86_64"` in `utmzip.pkl`.  Its `qemu.sh`
+uses OVMF (x86_64 UEFI firmware) instead of SeaBIOS, which starts in 64-bit mode
+with MMIO — no real-mode I/O port bottleneck.  This is the primary solution for
+CI cross-arch testing (x86_64 on ARM64 hosts).
+
+OVMF firmware paths searched (in order):
+- macOS: `/opt/homebrew/share/qemu/edk2-x86_64-code.fd`, `/usr/local/share/qemu/...`
+- Linux: `/usr/share/OVMF/OVMF_CODE.fd`, `OVMF_CODE_4M.fd`, `/usr/share/edk2/x64/...`
+- Override: `QEMU_EFI_CODE` / `QEMU_EFI_VARS` environment variables
+
+### Why `pc` + `-nodefaults` for SeaBIOS cross-arch x86_64 on ARM
 
 SeaBIOS q35 PCIe initialization plus default device probing (floppy, VGA, parallel
 port, USB) is extremely slow under cross-arch TCG — x86 real-mode I/O port emulation
@@ -261,6 +276,11 @@ consume ~199% CPU for 5+ minutes without ever printing SeaBIOS's banner.
 
 RouterOS CHR doesn't depend on q35-specific features — `if=virtio` resolves to
 `virtio-blk-pci` on both `pc` and `q35`, and `virtio-net-pci` works identically.
+
+The `.qemu.` machines keep SeaBIOS to match their UTM `config.plist` spec (standard
+MikroTik image, not fat-chr).  CI tolerates timeouts on SeaBIOS x86_64 machines
+running on ARM64 runners — the `.apple.` machine with OVMF provides the cross-arch
+coverage.
 
 ### Why SLIRP networking (not bridge/tap)
 
