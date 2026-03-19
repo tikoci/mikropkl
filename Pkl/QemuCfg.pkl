@@ -316,6 +316,15 @@ function launchScript(
   PFLASH_FLAGS="-drive if=pflash,format=raw,readonly=on,unit=0,file=$EFI_CODE"
   PFLASH_FLAGS="$PFLASH_FLAGS -drive if=pflash,format=raw,unit=1,file=$VARS_COPY"
   CPU_FLAGS=""
+  # HVF on macOS x86_64: use host CPU to avoid CPUID feature mismatches.
+  # Without -cpu host, the default QEMU CPU model (e.g. qemu64) requests AMD-
+  # specific CPUID features (SVM bit 2 in CPUID[80000001h].ECX) that Intel
+  # hosts do not have.  With HVF, QEMU passes CPUID directly to the guest, so
+  # OVMF receives a contradictory feature set and hangs during initialisation.
+  # -cpu host exposes the real Intel CPUID, which OVMF handles correctly.
+  if [ "$ACCEL" = "hvf" ]; then
+    CPU_FLAGS="-cpu host"
+  fi
   # -nodefaults: skip default floppy/VGA/USB (faster OVMF init, esp. cross-arch).
   # disable-legacy=on is set directly on virtio devices in qemu.cfg, forcing
   # virtio-1.0 modern transport (MMIO BARs instead of I/O port BARs).
@@ -345,8 +354,13 @@ function launchScript(
     DISPLAY_FLAGS="$DISPLAY_FLAGS -chardev socket,id=serial0,path=$SERIAL_SOCK,server=on,wait=off"
     DISPLAY_FLAGS="$DISPLAY_FLAGS -serial chardev:serial0"
   else
-    # Foreground: serial on stdio for interactive use
-    DISPLAY_FLAGS="-nographic"
+    # Foreground: serial on stdio using the same explicit chardev pattern as
+    # background mode.  -nographic relies on QEMU's implicit "-serial mon:stdio"
+    # expansion which can silently fail when combined with -nodefaults on some
+    # QEMU versions / accelerators (e.g. HVF on macOS).  Explicit chardev is
+    # identical in behaviour (mux=on gives the Ctrl-a c monitor switch) but
+    # does not depend on QEMU's -nographic post-processing of -nodefaults state.
+    DISPLAY_FLAGS="-display none -chardev stdio,id=serial0,mux=on -mon chardev=serial0,mode=readline -serial chardev:serial0"
   fi
 
   # ── Assemble and run ──

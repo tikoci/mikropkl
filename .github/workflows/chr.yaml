@@ -115,6 +115,7 @@ jobs:
       - name: Create ZIP for ${{ matrix.machine}}
         id: rename
         run: |
+          find "${{ matrix.machine }}" -name "*.sh" -exec chmod a+x {} \;
           zip -r ${{ matrix.machine}}.zip ${{ matrix.machine}} 
       - name: Upload Pkl'd image ${{ matrix.machine }} as release asset
         id: upload-release-asset-raw
