@@ -4,25 +4,28 @@ This file documents the mikropkl project for AI coding agents.  Read it before m
 
 ## Project Purpose
 
-`mikropkl` produces **UTM virtual machine bundles** (`.utm` directories) from [`pkl`](https://pkl-lang.org) manifests, with MikroTik RouterOS CHR as the primary guest OS.
+`mikropkl` produces **declarative virtual machine packages** for MikroTik RouterOS CHR using [`pkl`](https://pkl-lang.org).  The primary output is UTM bundles (`.utm` directories) for macOS, with QEMU launch scripts (`qemu.sh` + `qemu.cfg`) for Linux and CI testing.
 
-Additional goals:
-- Generate `qemu.sh` and `qemu.cfg` alongside each QEMU machine so the same disk images can be tested under QEMU/libvirt on Linux CI (GitHub Actions) or users without UTM like Linux.
-Note: The `.utm` bundle is a ZIP archive — in principle usable as a deployment format on Linux too (see "Future Work" at the end of this document).
+The goal is to streamline getting RouterOS CHR running — whether checking a config on an older version, trying a new feature, or bringing up multiple CHRs for network testing.  Without `mikropkl`, getting CHR running involves downloading images from MikroTik, navigating several UI dialogs or constructing long `qemu-system-*` command lines.  `mikropkl` replaces all that with declarative `pkl` manifests and `make`.
 
-UTM is a macOS virtualization application.  **This project is macOS-first for users;
-Linux CI is for automated testing only (currently).**
+**Two delivery paths:**
+- **UTM** (macOS-first): `utm://downloadVM?url=...` one-click install, or download ZIP and open.  UTM handles the VM lifecycle.
+- **QEMU** (macOS + Linux): Each `.utm` bundle includes `qemu.sh` + `qemu.cfg`.  Unpack the ZIP, run `./qemu.sh`, get a RouterOS prompt.  Also used for CI validation.
+
+The `.utm` bundle is a ZIP archive — structurally portable.  A future `mikropkl` CLI tool could manage QEMU-based instances from `~/.local/` or `~/.mikropkl/`, providing a Linux-native experience similar to UTM's on macOS.
+
+**Platform focus**: macOS and Linux.  Windows/WSL is not a target — we won't document setup steps, but QEMU on WSL should work since the scripts are POSIX shell.  If someone reports a WSL issue, we'd consider it.  The core challenge on Windows is that there's no default virtualization platform equivalent to KVM or Apple's Hypervisor.framework, so the kind of automation `mikropkl` does doesn't map cleanly to `"brew install qemu"` or `"apt install qemu"`.
 
 ## Directory Structure
 
 ```
-Makefile              ← two-phase build orchestration
+Makefile              ← two-phase build orchestration (source of truth for building)
 Manifests/            ← one .pkl file per machine variant (amend Templates/)
 Templates/            ← mid-level pkl templates (amend Pkl/utmzip.pkl)
 Pkl/                  ← core pkl modules
   utmzip.pkl          ← root module: defines all file outputs for a .utm bundle
-  Libvirt.pkl         ← generates libvirt.xml from UTM config fields (QEMU only)
   QemuCfg.pkl         ← generates qemu.cfg (ini) + qemu.sh (launcher) for direct QEMU use
+  Libvirt.pkl         ← generates libvirt.xml (experimental, disabled by default)
   CHR.pkl             ← RouterOS CHR download URL logic and SVG icon helpers
   UTM.pkl             ← UTM-specific types (SystemArchitecture, BackendType, etc.)
   Randomish.pkl       ← deterministic pseudo-random helpers (MAC address generation)
@@ -30,15 +33,16 @@ Pkl/                  ← core pkl modules
   chr-version.pkl     ← resolves RouterOS version from release channel (env: CHR_VERSION)
 Files/
   efi_vars.fd         ← UEFI variable store (copied into Apple-backend bundles)
-  LIBVIRT.md          ← libvirt-specific documentation (see below)
+  QEMU.md             ← user-facing QEMU deployment guide
 Machines/             ← build output (git-ignored except .url/.size placeholders)
 Lab/                  ← local experiments, debug scripts, investigation notes (NOT build artifacts)
+  libvirt/            ← libvirt experiment docs and notes (see LIBVIRT.md inside)
   qemu-arm64/         ← QEMU aarch64 boot investigation (see NOTES.md inside)
   x86-direct-kernel/  ← x86 direct kernel boot experiments (see NOTES.md inside)
 .github/workflows/
   chr.yaml            ← builds and releases UTM packages to GitHub Releases
-  libvirt-test.yaml   ← boots each QEMU machine in CI and checks installation
   qemu-test.yaml      ← boots each QEMU machine via qemu.sh and runs REST API checks
+  libvirt-test.yaml   ← historical: precursor to qemu-test.yaml (parses XML → raw QEMU)
   auto.yaml           ← automated trigger for chr.yaml on new RouterOS versions
 ```
 
@@ -97,17 +101,31 @@ See `Lab/x86-direct-kernel/NOTES.md` for full analysis of why `-kernel` doesn't 
 
 ## Backend / Architecture Matrix
 
-The project produces five machine variants across two backends and two architectures:
+The project produces machine variants across two backends and two architectures.  The
+backend name in the manifest (`*.qemu.*` vs `*.apple.*`) determines the **boot track**:
+
+- **SeaBIOS track** (`*.qemu.*`): Uses MikroTik's standard x86 image with proprietary boot
+  sector.  SeaBIOS chain-loads via MBR.  Simplest and fastest.  aarch64 `*.qemu.*` uses
+  EDK2 UEFI with the standard ARM64 image.
+- **EFI/VirtIO track** (`*.apple.*`): Uses UEFI firmware throughout.  x86_64 requires the
+  repackaged FAT16 EFI image from `tikoci/fat-chr`.  aarch64 uses the standard ARM64 image
+  (already FAT16 EFI).  On macOS, UTM uses Apple Virtualization.framework; the QEMU scripts
+  in `*.apple.*` bundles mirror the same pure-VirtIO configuration for cross-platform testing.
 
 | Machine | Backend | Arch | Firmware | Disk interface (plist) | Actual QEMU device | Image source |
 |---|---|---|---|---|---|---|
 | `chr.x86_64.qemu` | QEMU | x86_64 | SeaBIOS | VirtIO | `if=virtio` (virtio-blk-pci on q35) | MikroTik |
 | `chr.aarch64.qemu` | QEMU | aarch64 | UEFI (EDK2) | NVMe (plist) | **virtio-blk-pci** (NOT NVMe) | MikroTik |
 | `chr.x86_64.apple` | Apple VZ | x86_64 | Built-in UEFI | NVMe | NVMe (actual) | tikoci/fat-chr |
+| `chr.aarch64.apple` | Apple VZ | aarch64 | Built-in UEFI | VirtIO | VirtIO (actual) | MikroTik |
 | `rose.chr.x86_64.qemu` | QEMU | x86_64 | SeaBIOS | VirtIO | same + qcow2 additional disks | MikroTik |
 | `rose.chr.aarch64.qemu` | QEMU | aarch64 | UEFI (EDK2) | NVMe (plist) | **virtio-blk-pci** | MikroTik |
 
 "ROSE" variants add 4 × 10 GB qcow2 disks for multi-disk RouterOS testing.
+
+All `*.apple.*` bundles also get `qemu.cfg` + `qemu.sh` (with UEFI firmware) for QEMU-based
+testing.  These scripts don't aim to replicate Apple VZ faithfully — they provide a
+pure-VirtIO QEMU configuration suitable for cross-platform CI and local testing.
 
 ### Important: VirtIO on aarch64
 
@@ -195,14 +213,13 @@ The Makefile runs in **two recursive phases**:
      - `*.img.zip.url` — URL to download from MikroTik
      - `*.size` — qcow2 disk size in MiB (for `qemu-img create`)
      - `*.localcp` — filename of a file to copy from `Files/`
-   - Also emits `qemu.cfg` + `qemu.sh` (QEMU machines only, enabled by default) with relative `./Data/` paths
-   - Optionally emits `libvirt.xml` (QEMU machines only, disabled by default — enable with `LIBVIRT_OUTPUT=true`) with `/LIBVIRT_DATA_PATH/` sentinel
+   - Also emits `qemu.cfg` + `qemu.sh` (enabled by default) with relative `./Data/` paths
+   - All backends get `qemu.cfg` + `qemu.sh` — Apple backends use UEFI firmware in their QEMU scripts
 
 2. **`make phase2`** → resolves placeholders:
    - `*.img.zip.url` → `wget` + `unzip` → raw `.img` disk (cached in `.url-cache/`)
    - `*.size` → `qemu-img create -f qcow2`
    - `*.localcp` → `cp` from `Files/`
-   - `libvirt-fixpaths` → replaces `/LIBVIRT_DATA_PATH/` sentinel with real absolute paths
    - `qemu-chmod` → makes `qemu.sh` scripts executable
 
 Running `make` triggers `phase1` then recursively calls `make phase2`.
@@ -228,8 +245,8 @@ copy — the image is `unzip`/`cp`'d from cache into each machine's `Data/` dire
 Manifests/chr.x86_64.qemu.pkl
   amends Templates/chr.utmzip.pkl
     extends Pkl/utmzip.pkl          ← main output module
-      imports Pkl/Libvirt.pkl       ← produces libvirt.xml (QEMU only)
-      imports Pkl/QemuCfg.pkl       ← produces qemu.cfg + qemu.sh (QEMU only)
+      imports Pkl/QemuCfg.pkl       ← produces qemu.cfg + qemu.sh
+      imports Pkl/Libvirt.pkl       ← produces libvirt.xml (experimental, disabled by default)
       imports Pkl/Randomish.pkl     ← MAC address
       imports Pkl/CHR.pkl           ← download URL, icon SVG
       imports Pkl/UTM.pkl           ← types
@@ -240,104 +257,21 @@ directory (`Machines/`).  The value is a resource with `.text` or `.bytes`.
 
 ## Key pkl Patterns
 
-- `when (backend == "QEMU") { ... }` — conditional output block for libvirt.xml
-- `driveImageNames.mapIndexed((i, n) -> diskElement(i, n)).join("")` — list → XML string
+- `when (backend == "QEMU" && qemuOutput) { ... }` — conditional output for qemu.cfg/qemu.sh
 - `List(primaryImage) + additionalDisks.mapIndexed(...)` — build disk list
-- No `pkl:xml` renderer is used — the codebase uses string interpolation for all XML output
-  (see `Libvirt.pkl` and the SVG helpers in `CHR.pkl`)
+- No `pkl:xml` renderer is used — string interpolation for all XML/INI output
 
-## Libvirt.pkl — Design Notes
+## Libvirt — Experimental (Disabled by Default)
 
-See `Files/LIBVIRT.md` for end-user documentation.  Agent-relevant details:
+`Libvirt.pkl` exists in `Pkl/` and generates `libvirt.xml` when `LIBVIRT_OUTPUT=true`.
+It is **not** part of the standard build and is not included in releases.  The
+`libvirt-test.yaml` workflow was the precursor to `qemu-test.yaml` — it parsed the
+libvirt XML via `xmllint` just to construct raw QEMU command lines, which is how we
+arrived at the current `qemu.sh`/`qemu.cfg` approach.
 
-### Architecture differences encoded in Libvirt.pkl
-
-| Field | x86_64 | aarch64 |
-|---|---|---|
-| `<os>` | plain `<os>` (SeaBIOS) | `<os firmware="efi">` (libvirt auto UEFI) |
-| machine type | `q35` | `virt` |
-| serial target | `isa-serial` / `isa-serial` | `system-serial` / `pl011` |
-| emulator path | `/usr/bin/qemu-system-x86_64` | `/usr/bin/qemu-system-aarch64` |
-| features | `<acpi/>` + `<apic/>` | (none — `virt` has ACPI by default) |
-| disk bus | `<target bus="virtio"/>` | `<target bus="virtio"/>` |
-
-Both architectures use `<target bus="virtio"/>` in libvirt XML.  Libvirt maps this
-to `virtio-blk-pci` on both `q35` and `virt` machine types — matching UTM/QEMU
-behaviour.  The workflow uses explicit `-device virtio-blk-pci` for aarch64 when
-launching QEMU directly (bypassing libvirt).
-
-### Disk path sentinel
-
-`Libvirt.pkl` writes `/LIBVIRT_DATA_PATH/<imagename>` in `<source file="">`.
-This passes the libvirt RelaxNG `absFilePath` regex `(/|[a-zA-Z]:\\).+` while
-remaining a valid placeholder.  `make libvirt-fixpaths` uses `perl -i -pe` to
-substitute the real absolute path.
-
-### Why no `migratable` on `<cpu>`
-
-`migratable="on"` with `host-passthrough` is rejected by QEMU builds that don't support
-live migration (including Homebrew QEMU on macOS).  It was removed; `check="none"` is enough.
-
-### Network: user-mode (SLIRP)
-
-`libvirt.xml` uses `<interface type="user">` for networking, which does not support
-`hostfwd` port-forwarding via the libvirt XML alone.  Port forwarding requires either
-`<qemu:commandline>` extensions in the XML, or launching QEMU directly with
-`-netdev user,id=net0,hostfwd=tcp::9180-:80`.  The CI workflow uses the latter approach.
-
-## libvirt-test.yaml — How the CI Works
-
-### Build job (ubuntu-latest, x86_64)
-- Installs pkl binary, resolves RouterOS version via `pkl eval ./Pkl/chr-version.pkl`
-- Runs `make CHR_VERSION=<version>` which downloads real disk images from MikroTik
-- Uploads entire `./Machines/` as an artifact
-
-### Test job (matrix per machine, arch-matched runner)
-- `aarch64` machines → `ubuntu-24.04-arm` (native ARM64)
-- `x86_64` machines → `ubuntu-latest`
-- Installs `qemu-system-arm` or `qemu-system-x86` (no full libvirt daemon needed)
-- **KVM setup**: Always applies udev rule first, THEN checks `/dev/kvm` accessibility.
-  KVM is available on `ubuntu-latest`; availability on `ubuntu-24.04-arm` varies.
-- Without KVM on aarch64: must pass `-cpu cortex-a710` — matches the UTM config.plist
-  CPU setting and is the model RouterOS CHR ARM64 is validated against.
-  Also pass `-accel tcg,tb-size=256` for TCG performance.
-- **aarch64 UEFI**: uses `-drive if=pflash,unit=0` (code, read-only) + `unit=1` (vars,
-  writable copy of `QEMU_VARS.fd`). Do NOT use `-bios QEMU_EFI.fd` — newer EDK2 builds
-  require a writable pflash1 for NVRAM; `-bios` only provides read-only code ROM and
-  can prevent UEFI from completing initialisation.
-  Both pflash units must be identical in size — truncate/pad the vars file to match
-  the code ROM (typically 64 MiB on Ubuntu).
-  **IMPORTANT**: On `ubuntu-24.04-arm` (native ARM runner), `qemu-efi-aarch64` installs
-  `QEMU_EFI.fd` at only **2 MiB** — this is a compact variant unsuitable as the code ROM.
-  Prefer `AAVMF_CODE.fd` + `AAVMF_VARS.fd` (both 64 MiB, from `qemu-efi-aarch64` package
-  at `/usr/share/AAVMF/`). The workflow searches AAVMF first, then QEMU_EFI.fd as fallback.
-  **IMPORTANT**: On `ubuntu-24.04-arm`, `AAVMF_CODE.fd` is a **symlink** (e.g. to
-  `AAVMF_CODE.no-secboot.fd`).  Use `stat -Lc%s` (not `stat -c%s`) to get the real
-  file size — without `-L`, `stat` returns the symlink target path length (~24 bytes)
-  instead of the actual 64 MiB ROM size, causing pflash size mismatches.
-- **aarch64 disks**: use `-drive if=none,id=driveN -device virtio-blk-pci,drive=driveN`.
-  UTM maps its plist `Interface=NVMe` to `virtio-blk-pci` (NOT actual NVMe), and the
-  `if=virtio` shorthand resolves to `virtio-blk-device` (MMIO) on the virt machine type,
-  which is not what works.
-- **Display / serial**: Do NOT use `-nographic` when QEMU is backgrounded — it redirects
-  serial to stdio, which blocks indefinitely without an interactive terminal.  Use
-  `-display none -monitor none -chardev socket,...,server=on,wait=off -serial chardev:...`
-  instead.
-- **Health check**: polls `http://localhost:9180/` (WebFig root, returns HTTP 200 without
-  auth).  **Never** poll `/rest/` for health — it returns HTTP 401 which causes
-  `curl --fail` to exit non-zero, making RouterOS look down even when it's running.
-- **`check-installation` on aarch64**: always returns HTTP 400 `"damaged system package:
-  bad image"` in QEMU (confirmed even on UTM/macOS). The CI workflow skips this check on
-  aarch64.  See "Known Limitations" section below for full root cause analysis.
-- **API calls**: use `http://admin:@localhost:9180/rest/…` (empty password = RouterOS default)
-- **ROSE machines**: libvirt.xml contains multiple `<disk>` entries.  The workflow
-  extracts ALL disks via `xmllint` loop and passes each as a separate QEMU `-drive` flag.
-- **Timeouts**: KVM (any arch) = 2 min; x86_64 without KVM = 3 min; aarch64 without KVM = 4 min
-
-### Port forwarding
-`libvirt.xml` uses `<interface type="user">` (SLIRP), which does not support port
-forwarding in the XML without `<qemu:commandline>` extensions.  The workflow launches QEMU
-directly (not via `virsh start`) and adds `-netdev user,id=net0,hostfwd=tcp::9180-:80`.
+Treat libvirt as a potential future feature.  See `Lab/libvirt/LIBVIRT.md` for docs.
+The code is harmless in `Pkl/Libvirt.pkl` (guarded by `libvirtOutput` flag, defaults
+to `false`) and Makefile targets are preserved for experimentation.
 
 ## Known Limitations
 
@@ -424,8 +358,6 @@ See `Lab/x86-cross-arch/NOTES.md` for the full investigation and test scripts.
 - **Partial build / stale Machines/**: `pkl` always writes all output files.  Run
   `make clean` before builds if you need a pristine state.  Use `make distclean`
   to also purge the download cache (`.url-cache/`).
-- **libvirt-fixpaths writes absolute paths**: If you move the `Machines/` directory,
-  re-run `make libvirt-fixpaths` or re-run `make` from scratch.
 - **qemu.cfg uses relative paths**: Disk paths in `qemu.cfg` are relative (`./Data/...`).
   `qemu.sh` changes to its own directory before launching QEMU so relative paths resolve
   correctly.  Downloaded `.utm` ZIPs from GitHub Releases work without path fixups.
@@ -433,10 +365,8 @@ See `Lab/x86-cross-arch/NOTES.md` for the full investigation and test scripts.
 - **Apple backend machines**: Do NOT get `libvirt.xml` — the
   `when (backend == "QEMU")` gate in `utmzip.pkl` prevents it.  However,
   `chr.x86_64.apple` DOES get `qemu.cfg` + `qemu.sh` (with OVMF instead of SeaBIOS)
-  via a separate `when (backend == "Apple" && architecture == "x86_64")` gate, enabling
+  via a separate `when (backend == "Apple" && qemuOutput)` gate, enabling
   cross-arch CI testing on ARM64 hosts.
-- **libvirt.xml not generated by default**: Set `LIBVIRT_OUTPUT=true` to enable.
-  The `libvirt-test.yaml` CI workflow sets this automatically.
 
 ## Build Commands
 
@@ -450,23 +380,14 @@ make clean && make CHR_VERSION=7.22
 # Full clean including download cache
 make distclean && make CHR_VERSION=7.22
 
-# Enable libvirt.xml output alongside QEMU scripts
-LIBVIRT_OUTPUT=true make CHR_VERSION=7.22
-
 # Disable QEMU scripts (just UTM bundles)
 QEMU_OUTPUT=false make CHR_VERSION=7.22
 
 # pkl only (no downloads)
 pkl eval ./Manifests/*.pkl -m ./Machines
 
-# Fix libvirt paths after pkl runs (normally automatic in phase2)
-make libvirt-fixpaths
-
 # Make qemu.sh executable (normally automatic in phase2)
 make qemu-chmod
-
-# Validate libvirt XML
-make libvirt-validate   # requires: brew install libvirt (macOS) or apt libvirt-clients (Linux)
 
 # Run a QEMU machine via qemu.sh (after build)
 make qemu-run QEMU_UTM=Machines/chr.x86_64.qemu.7.22.utm
@@ -488,9 +409,8 @@ make qemu-list
    architecture = "aarch64"
    ```
 2. Run `make` — pkl generates the bundle, make downloads disk images.
-3. If the new manifest is QEMU-backend, `libvirt.xml` is automatically produced.
-4. The `libvirt-test.yaml` workflow will automatically pick it up via the `list-machines`
-   step (searches for any `Machines/*.utm/libvirt.xml`).
+3. The `qemu-test.yaml` workflow will automatically pick it up via
+   machine discovery (searches `Machines/*.utm/qemu.cfg`).
 
 ## GitHub Actions Workflows
 
@@ -498,8 +418,8 @@ make qemu-list
 |---|---|---|
 | `chr.yaml` | manual dispatch | Builds and publishes UTM packages to GitHub Releases |
 | `auto.yaml` | scheduled | Triggers `chr.yaml` when a new RouterOS version is detected |
-| `libvirt-test.yaml` | manual dispatch | Boots all QEMU machines in CI and checks installation |
 | `qemu-test.yaml` | manual dispatch | Boots each QEMU machine via qemu.sh and runs REST API checks |
+| `libvirt-test.yaml` | manual dispatch | Historical: precursor to qemu-test.yaml (parses XML → raw QEMU) |
 
 ### qemu-test.yaml — How the CI Works
 
@@ -626,7 +546,7 @@ run: |
 | `xxd` / `hexdump` | Built-in | Raw hex inspection of disk images and boot sectors |
 | `hdiutil` | Built-in (macOS) | Attach/mount disk images (e.g., `hdiutil attach -nomount chr.img`) |
 
-### For libvirt XML validation
+### For libvirt XML validation (experimental)
 
 | Tool | Install | Purpose |
 |---|---|---|
@@ -647,33 +567,50 @@ run: |
 
 ## Future Work
 
-### macOS CI runners for UTM validation
+### macOS CI Workflow for UTM Validation (Priority: High)
 
-GitHub Actions now offers `macos-13` (Intel) and `macos-14`/`macos-15` (Apple Silicon)
-runners with UTM/Virtualization.framework support.  A new workflow could:
-- Build the `.utm` bundles
-- Install UTM via Homebrew Cask (`brew install --cask utm`)
-- Use `utmctl` (UTM's CLI) or AppleScript to start VMs and verify HTTP health
-- Test the Apple VZ backend (x86_64 on Intel runners, aarch64 on ARM runners)
-- Validate that `utm://downloadVM?url=` install links work
+GitHub Actions macOS runners do **not** support Hypervisor.framework (nested virtualization).
+This means UTM/Apple VZ cannot run on GitHub-hosted runners.  A future workflow could still:
+- Build `.utm` bundles and validate structure
+- Use `utmctl` (UTM's CLI) for basic inspection
+- Potentially test on self-hosted macOS runners with bare-metal hardware
 
-This would complement the existing `libvirt-test.yaml` by covering the Apple backend.
+### `mikropkl` CLI — Linux Deployment Tool (Priority: Medium)
 
-### UTM bundle as Linux deployment format
+A CLI tool that downloads and manages RouterOS CHR instances from GitHub Releases:
+- Download `.utm` ZIP, extract, and manage in `~/.mikropkl/<machine-name>/`
+- Start/stop via `qemu.sh` with PID tracking
+- Support multiple versions side-by-side for topology testing
+- Provide `--port` flag to override default port mapping
+- Consider generating systemd units for persistent deployments
 
-Since `.utm` is a ZIP archive containing disk images + metadata, it could serve as a
-deployment format beyond macOS:
-- A `chr_install.sh` script could unpack `.utm` ZIP, locate disk images, and
-  generate appropriate QEMU launch scripts or systemd units
-- Local storage convention: `~/.mikropkl/<machine-name>/` for unpacked images
-- Support multiple RouterOS versions side-by-side for testing networking topologies
-- The script could download images automatically from GitHub Releases using the
-  same URLs in `*.img.zip.url` placeholder files
+### fat-chr Integration into Makefile (Priority: Medium)
 
-### Multi-version RouterOS testing
+The `tikoci/fat-chr` repackaging step (converts proprietary x86 boot partition to FAT16
+EFI) could be done directly in the Makefile using `qemu-img` and `mtools` (already
+available as build dependencies).  This would eliminate the `auto.yaml` timing issue where
+the mikropkl build triggers fat-chr but doesn't wait for it to complete.
 
-The current build produces one version at a time.  For network topology testing
-(multiple RouterOS instances with different versions), the project could:
-- Support building multiple versions in parallel (`make CHR_VERSION=7.22 CHR_VERSION_2=7.18`)
-- Generate bridge/tap networking configs for inter-VM communication
-- Produce docker-compose-like orchestration for multi-router labs
+### Post-Boot Automation (Priority: Low)
+
+Scripts to configure RouterOS after initial boot:
+- Set passwords, install packages, format ROSE disks
+- Run via REST API or serial console automation (`expect` or similar)
+- Could integrate with `bun` test framework for validation
+
+### Multi-Version / Multi-Router Topology Testing (Priority: Low)
+
+For testing RouterOS networking between instances:
+- Generate bridge/tap configs for inter-VM communication
+- Support naming and addressing scheme (router1, router2, etc.)
+- Port range allocation (9181, 9182, etc.)
+- Richer networking modes: bridged, shared (beyond current port-forwarding only)
+
+### GitHub Pages Download Site (Priority: Low)
+
+A website to view and download images — similar to `tikoci/restraml` pattern.
+
+### GitHub Issue → Custom Package (Priority: Low)
+
+Use Copilot Agent on GitHub to parse an Issue requesting a custom configuration,
+generate a pkl template, build, and publish to Releases — without requiring `git clone`.

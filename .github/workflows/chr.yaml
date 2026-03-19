@@ -170,9 +170,9 @@ jobs:
             assuming [UTM](https://mac.getutm.app) is installed, the folder ending in `.utm`
             will launch in UTM, like any other macOS "document".  
 
-            #### QEMU launch scripts (experimental)
+            #### QEMU launch scripts
             Each QEMU-backend `.utm` bundle includes `qemu.sh` and `qemu.cfg` for running
             the VM directly under QEMU — on macOS or Linux — without UTM installed.
-            See the [QEMU scripts section](https://github.com/${{ github.repository }}#qemu-launch-scripts) in the README for details.
+            See [QEMU deployment guide](https://github.com/${{ github.repository }}/blob/main/Files/QEMU.md) or the [README](https://github.com/${{ github.repository }}#qemu-launch-scripts) for details.
 
 

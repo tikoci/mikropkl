@@ -7,7 +7,7 @@ agent work.
 
 ## Architecture Summary
 
-The project has three output layers, each derived from the same pkl manifests:
+The project has two output layers, each derived from the same pkl manifests:
 
 ```
    pkl Manifests (.pkl)
@@ -15,19 +15,16 @@ The project has three output layers, each derived from the same pkl manifests:
         ├─→ UTM bundle (.utm)       macOS/UTM.app — primary user-facing
         │     config.plist
         │     Data/ (disk images)
+        │     qemu.cfg               QEMU --readconfig ini format
+        │     qemu.sh                Launch script (pflash, accel, networking, serial)
         │
-        ├─→ libvirt.xml              Linux/QEMU — CI testing
-        │     (in-bundle, QEMU backend only)
-        │
-        ├─→ qemu.cfg                 Linux/QEMU — portable bare-metal
-        │     (QEMU --readconfig ini format, in-bundle)
-        │
-        └─→ qemu.sh                  Launch script for qemu.cfg
-              (handles pflash, accel, networking, serial)
+        └─→ (libvirt.xml)           Experimental — disabled by default
 ```
 
 The `.utm` directory IS a ZIP archive — this is the key insight for Linux deployment.
-UTM bundles are macOS-first but structurally portable.
+UTM bundles are macOS-first but structurally portable.  Every bundle includes
+`qemu.cfg` + `qemu.sh` so users on Linux (or macOS without UTM) can unpack the
+ZIP and run QEMU directly.
 
 ## Image Pipeline
 
@@ -43,7 +40,7 @@ tikoci/fat-chr      ─→  chr-efi.img            (x86_64, reformatted FAT16 EF
 - QEMU x86_64 → standard `chr-<ver>.img` + SeaBIOS (simplest, fastest)
 - QEMU aarch64 → standard `chr-<ver>-arm64.img` + EDK2 UEFI pflash
 - Apple VZ x86_64 → `chr-efi.img` from fat-chr (needs proper FAT EFI partition)
-- Apple VZ aarch64 → [untested] standard ARM64 image should work (already FAT16)
+- Apple VZ aarch64 → [untested] standard ARM64 image (already FAT16)
 
 ## VirtIO Deep Dive
 
@@ -98,7 +95,7 @@ to get the real file size — without `-L`, `stat` returns the symlink path leng
 ### 1. QEMU `--readconfig` / ini config file — ✅ IMPLEMENTED
 
 Implemented in `Pkl/QemuCfg.pkl`.  Generates `qemu.cfg` (QEMU --readconfig ini) and
-`qemu.sh` (companion launcher) alongside `libvirt.xml` for each QEMU machine.
+`qemu.sh` (companion launcher) for each machine.
 
 **What was built:**
 - `QemuCfg.pkl` module with `config()` and `launchScript()` functions
@@ -134,15 +131,11 @@ backgrounded child process, either use deterministic paths without cleanup traps
 
 ### 2. macOS CI Workflow for UTM Validation (Priority: High)
 
-New workflow `utm-test.yaml`:
-- Trigger: manual dispatch (same pattern as `libvirt-test.yaml`)
-- Runner: `macos-13` (Intel) for x86_64 Apple VZ, `macos-15` (ARM) for aarch64
-- Steps:
-  1. Build bundles with `make`
-  2. Install UTM: `brew install --cask utm`
-  3. Open each `.utm` bundle: `open <bundle>.utm` or `utmctl` CLI
-  4. Health check: poll `http://localhost:80/` (UTM port mapping may differ)
-  5. REST API verification
+GitHub Actions macOS runners do **not** support Hypervisor.framework (nested virtualization).
+A future workflow could still:
+- Build `.utm` bundles and validate structure
+- Use `utmctl` (UTM's CLI) for basic inspection
+- Potentially test on self-hosted macOS runners with bare-metal hardware
 
 **Considerations:**
 - UTM port forwarding works differently from QEMU — need to check UTM's config for
@@ -150,22 +143,20 @@ New workflow `utm-test.yaml`:
 - Apple VZ machines may expose network differently (shared vs bridged)
 - macOS runners cost more than Linux — keep test matrix minimal
 - `utmctl` (UTM CLI) capabilities need investigation — it may support start/stop/status
-- Test the `utm://downloadVM?url=` deep link scheme if possible
 
-### 3. `chr_install.sh` — Linux Deployment Script (Priority: Medium)
+### 3. `mikropkl` CLI — Linux Deployment Tool (Priority: Medium)
 
-A shell script that downloads and manages RouterOS CHR instances from GitHub Releases:
+A CLI tool that downloads and manages RouterOS CHR instances from GitHub Releases:
 
 ```sh
 # Usage examples:
-chr_install.sh install chr.x86_64.qemu 7.22    # download + unpack to ~/.mikropkl/
-chr_install.sh list                              # show installed versions
-chr_install.sh start chr.x86_64.qemu.7.22       # launch QEMU from qemu.cfg
-chr_install.sh stop chr.x86_64.qemu.7.22        # stop running instance
+mikropkl install chr.x86_64.qemu 7.22    # download + unpack to ~/.mikropkl/
+mikropkl list                              # show installed versions
+mikropkl start chr.x86_64.qemu.7.22       # launch QEMU from qemu.cfg
+mikropkl stop chr.x86_64.qemu.7.22        # stop running instance
 ```
 
 **Storage convention:** `~/.mikropkl/<machine-name>/` with:
-- `config.pkl` (source of truth, from UTM bundle)
 - `config.plist` (UTM VM configuration, from UTM bundle)
 - `qemu.cfg` (launch config, from UTM bundle)
 - `qemu.sh` (launch script, from UTM bundle)
@@ -174,18 +165,25 @@ chr_install.sh stop chr.x86_64.qemu.7.22        # stop running instance
 
 **Implementation notes:**
 - Download `.utm` ZIP from GitHub Releases
-- Unpack, locate `qemu.cfg`, fix disk paths to local storage
+- Unpack — `qemu.cfg` uses relative paths, works without path fixups
 - Support multiple versions side-by-side for topology testing
 - Provide `--port` flag to override default port mapping
 - Consider generating systemd units for persistent deployments
 
-### 4. Multi-Version / Multi-Router Topology Testing (Priority: Low)
+### 4. fat-chr Integration into Makefile (Priority: Medium)
+
+The `tikoci/fat-chr` repackaging step (converts proprietary x86 boot partition to FAT16
+EFI) could be done directly in the Makefile using `qemu-img` and `mtools` (already
+available as build dependencies).  This would eliminate the `auto.yaml` timing issue
+where the mikropkl build triggers fat-chr but doesn't wait for it to complete.
+
+### 5. Multi-Version / Multi-Router Topology Testing (Priority: Low)
 
 For testing RouterOS networking between instances:
 - Generate bridge/tap configs for inter-VM communication
 - Support naming and addressing scheme (router1, router2, etc.)
 - Port range allocation (9181, 9182, etc.)
-- Optionally generate a `docker-compose.yml`-like manifest
+- Richer networking modes: bridged, shared (beyond current port-forwarding only)
 
 This depends on items 1 and 3 above being complete first.
 
@@ -214,18 +212,18 @@ aarch64, UTM actually passes `virtio-blk-pci` — matching the kernel's capabili
 True NVMe would require a different driver in the RouterOS kernel, which MikroTik
 doesn't include in CHR builds.
 
-### Why `host-passthrough` without `migratable`
+### Why `host-passthrough` without `migratable` (libvirt — experimental)
 
 Homebrew QEMU on macOS rejects `migratable="on"` — it's only meaningful for live
 migration, which QEMU-on-macOS doesn't support.  `check="none"` is sufficient for
-our use case.
+our use case.  This applies only to `Libvirt.pkl` output (disabled by default).
 
-### Why `/LIBVIRT_DATA_PATH/` sentinel (not relative paths)
+### Why `/LIBVIRT_DATA_PATH/` sentinel (libvirt — experimental)
 
 Libvirt's RelaxNG schema requires absolute file paths in `<source file="">`.  The
 regex pattern is `(/|[a-zA-Z]:\\).+` — relative paths fail with a misleading error.
 The sentinel is a valid absolute path that `make libvirt-fixpaths` replaces at build
-time.
+time.  This applies only to `Libvirt.pkl` output (disabled by default).
 
 ### Why deterministic temp file paths in qemu.sh (not mktemp)
 
@@ -250,12 +248,12 @@ High CPU (~194%) during cross-arch TCG is normal and confirms active emulation.
 ### Why `.apple.` machine gets `qemu.cfg` + `qemu.sh` with OVMF
 
 The `chr.x86_64.apple` bundle already contains the fat-chr image (proper FAT16 EFI
-partition).  It now also gets `qemu.cfg` + `qemu.sh` gated by
-`backend == "Apple" && architecture == "x86_64"` in `utmzip.pkl`.  Its `qemu.sh`
-uses OVMF (x86_64 UEFI firmware) instead of SeaBIOS, which starts in 64-bit mode
-with MMIO — no real-mode I/O port bottleneck.  This enables the apple machine to be
-tested on native x86 runners via KVM (fastest boot: ~10s) alongside the SeaBIOS
-machines.
+partition).  All `*.apple.*` bundles get `qemu.cfg` + `qemu.sh` (gated by
+`backend == "Apple" && qemuOutput` in `utmzip.pkl`).  The x86_64 apple machine's
+`qemu.sh` uses OVMF (x86_64 UEFI firmware) instead of SeaBIOS, which starts in
+64-bit mode with MMIO — no real-mode I/O port bottleneck.  This enables the apple
+machine to be tested on native x86 runners via KVM (fastest boot: ~10s) alongside
+the SeaBIOS machines.
 
 **Note**: Cross-arch testing of x86_64 on ARM64 was attempted over 16 CI iterations
 using `pc` + OVMF + modern virtio + HPET, but the pervasive x86 I/O port probing
@@ -363,11 +361,13 @@ No combination of machine type, firmware, or virtio mode can avoid this.
 The CI workflow now skips ALL x86_64 machines on the aarch64 runner.  The x86_64 runner
 provides complete coverage: x86 native via KVM, aarch64 cross-arch via TCG.
 
-### Why SLIRP networking (not bridge/tap)
+### Why SLIRP / user-mode networking
 
-`<interface type="user">` (SLIRP) doesn't require root privileges or host network
-configuration.  Good enough for CI testing where we just need HTTP access.  The
-trade-off is no port forwarding in libvirt XML — we add it via QEMU command line.
+QEMU's user-mode networking (`-netdev user,hostfwd=...`) doesn't require root
+privileges or host network configuration.  Good enough for CI testing where we just
+need HTTP access via port forwarding.  `qemu.sh` generates the appropriate
+`-netdev user,id=net0,hostfwd=tcp::<port>-:80` arguments.  A future topology testing
+feature may add bridge/tap support for inter-VM communication.
 
 ### Why `.url-cache/` with SHA1-keyed filenames
 
@@ -444,6 +444,8 @@ curl -s -u "admin:" http://localhost:9180/rest/system/identity
 |---|---|---|---|
 | `Lab/qemu-arm64/` | ARM64 boot, check-installation | Complete | ARM checker binary lacks `/bin/milo` fallback; unresolvable ACPI/DTB trilemma |
 | `Lab/x86-direct-kernel/` | x86 `-kernel` boot, UEFI handover | Complete | 16-bit setup needs BIOS INT; EFI handover offset hits compressed data |
+| `Lab/x86-cross-arch/` | x86_64 on ARM64 TCG | Complete | x86 I/O port bottleneck makes cross-arch TCG not viable; abandoned after 16 iterations |
+| `Lab/libvirt/` | Libvirt XML generation | Experimental | Precursor to qemu.sh/qemu.cfg; `LIBVIRT.md` docs moved here from `Files/` |
 | `Lab/report-arm64-chr-check-installation-failures.md` | User-facing report | Complete | Plain-language summary of ARM64 check failure |
 
 Each `Lab/*/NOTES.md` contains reproducible test procedures and binary analysis details.
