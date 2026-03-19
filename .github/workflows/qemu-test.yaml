@@ -3,7 +3,8 @@ name: "Test: QEMU Direct Boot"
 # Builds all QEMU manifests and boots them via qemu.sh on x86_64 and aarch64 runners.
 # x86_64 runner (Linux): boots ALL machines (x86 native via KVM, aarch64 cross-arch via TCG).
 # aarch64 runners (Linux + macOS): boot native aarch64 machines only (x86 cross-arch not viable).
-# macOS runner uses HVF for native aarch64, Linux uses KVM (when available) or TCG.
+# macOS runner (disabled by default — costs more, HVF unavailable on GitHub-hosted VMs).
+# Enable via dispatch input when needed.  Linux uses KVM (when available) or TCG.
 # qemu.cfg ↔ config.pkl consistency is checked for ALL machines on all runners.
 # This validates the full pipeline:
 #   pkl → config.plist → qemu.cfg → qemu.sh → running QEMU process → REST API
@@ -30,6 +31,11 @@ on:
         description: 'pkl Version'
         required: true
         default: "0.30.2"
+      macos:
+        type: boolean
+        description: 'Include macOS runner (costs more, HVF unavailable on GitHub-hosted VMs)'
+        required: false
+        default: false
 
 jobs:
   # ── Phase 1: build all QEMU machine bundles ───────────────────────────────
@@ -91,6 +97,9 @@ jobs:
             runner-arch: aarch64
             pkl-binary: pkl-macos-aarch64
       fail-fast: false
+
+    # Skip macOS runner unless explicitly requested via dispatch input
+    if: matrix.runner != 'macos-15' || inputs.macos
 
     runs-on: ${{ matrix.runner }}
 

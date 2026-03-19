@@ -503,21 +503,32 @@ make qemu-list
 
 ### qemu-test.yaml — How the CI Works
 
-Similar structure to `libvirt-test.yaml`: build job + 2 test jobs (x86_64 + aarch64).
+Similar structure to `libvirt-test.yaml`: build job + 2 test jobs (x86_64 + aarch64),
+plus an optional macOS job (disabled by default — enable via `macos: true` dispatch input).
 
 #### Cross-arch strategy
 - **x86_64 runner**: boots ALL machines — x86 native via KVM, aarch64 cross-arch via TCG (~20s)
 - **aarch64 runner**: boots only native aarch64 machines — x86 cross-arch skipped (not viable)
-- **macOS runner** (`macos-15`, Apple Silicon): boots native aarch64 machines via HVF
+- **macOS runner** (`macos-15`, Apple Silicon): disabled by default (costs more, HVF
+  unavailable on GitHub-hosted VMs — see below).  When enabled, boots native aarch64
+  machines via TCG.
 - Boot timing for each machine is displayed outside `::group::` blocks for visibility
 
 #### Package installation
 - Both runners install both architectures: `qemu-system-x86`, `qemu-system-arm`,
   `qemu-efi-aarch64` — x86 runner needs aarch64 packages for cross-arch TCG
 
-#### macOS HVF — CPU model
+#### macOS HVF — unavailable on GitHub-hosted runners
 
-With `-accel hvf` on Apple Silicon (macOS runner), QEMU uses the host CPU directly via
+Hypervisor.framework (HVF) is **not available** on any GitHub-hosted macOS runner —
+confirmed by [actions/runner-images#13505](https://github.com/actions/runner-images/issues/13505)
+(closed as "not planned") and [GitHub docs](https://docs.github.com/en/actions/reference/runners/larger-runners#limitations-for-macos-larger-runners)
+("Nested-virtualization is not supported").  This applies to all runner versions and sizes.
+`qemu.sh` detects this via `sysctl -n kern.hv_support` and falls back to TCG.
+
+#### macOS HVF — CPU model (when HVF is available, e.g. bare metal)
+
+With `-accel hvf` on Apple Silicon, QEMU uses the host CPU directly via
 Hypervisor.framework.  `cortex-a710` is ARMv9.0 and requires SVE2; Apple M-series chips
 are ARMv8.5/8.6 and do not expose SVE2 through HVF.  Attempting `-cpu cortex-a710` with
 HVF causes QEMU to crash during CPU init (before the VM even starts), which manifests as
