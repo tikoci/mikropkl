@@ -48,7 +48,7 @@ Additionally, there are a few network modes:
 
 There are some differences in network between Apple Virtualization and QEMU modes.  See specific docs for [QEMU](https://docs.getutm.app/settings-qemu/devices/network/network/) or [Apple](https://docs.getutm.app/settings-apple/devices/network/) for more details on virtual networking.
 
-> For `QEMU` backend, the included [QEMU launch scripts](#qemu-launch-scripts) that allow simple localhost testing without UTM and work on Mac and Linux only support port forwarding to REST API via socket for networking today.
+> All CHR bundles included [QEMU launch scripts](#qemu-launch-scripts) that allow simple localhost testing without UTM and work on Mac and Linux.  For Mac, shared and bridged options supported.  For lLnux, only port forwarding to REST API via socket without additional Linux networking configuration.
 
 
 > [!NOTE]
@@ -154,7 +154,7 @@ The original intent was to use this as part of CI system, like GitHub Actions.
 * `git` (optional, other than getting source, "brew install git" or XCode)
 * `qemu-img` (for building machines with extra disks, "brew install qemu")
 
-> `mikropkl` [QEMU runners]() can work with Ubuntu or Debian (adjust for other Linux distros), you'd need:
+> `mikropkl` [QEMU runners](Files/QEMU.md#platform-setup) can work with Ubuntu or Debian (adjust for other Linux distros), you'd need:
 >
 > * **x86_64**: `sudo apt-get install make pkl git qemu-system-x86`
 > * **aarch64**: `sudo apt-get install make pkl git qemu-system-arm qemu-efi-aarch64`
@@ -209,6 +209,9 @@ But adapting to new machine types beyond CHR requires a better understanding of 
 
 ## QEMU launch scripts
 
+> [!TIP]
+> **New: A full QEMU deployment guide is available in [Files/QEMU.md](Files/QEMU.md)** — covering platform setup, getting packages, networking options (port forwarding, vmnet on macOS, bridge/tap on Linux), disk image management, performance tips, and troubleshooting.
+
 CHR Releases from 7.23 onward each QEMU-backend `.utm` bundle includes a `qemu.sh` launcher and `qemu.cfg` configuration file for running the VM directly under QEMU — without UTM.  These are useful for testing, CI, troubleshooting UTM issues, and running CHR on Linux with pre-configured settings.  Currently, used to validate CHR images in GitHub Actions, but could be used for other purposes beyond UTM, like use on Linux.
 
 > `*.apple.*.utm` bundles also include `qemu.sh` and `qemu.cfg` for cross-platform testing, using UEFI firmware (OVMF for x86_64, EDK2 for aarch64).  These scripts don't replicate Apple Virtualization.framework's behavior — they provide a pure-VirtIO QEMU configuration suitable for CI and local testing.
@@ -223,21 +226,21 @@ The `qemu.sh` script **auto-detects** the best accelerator: KVM on Linux (if `/d
 
 In Terminal, `cd` to the downloaded UTM CHR package directory.  Within it is `qemu.sh` and `qemu.cfg` files.  The `qemu.cfg` is a representation of the `config.pkl` but rendered for QEMU, instead of the UTM `config.plist` file.  It stores things like memory and cpu counts (from original `pkl` Template settings), so those could be changed.  The `qemu.sh` handles options that are OS specific, like emulation or native (`hvf`) automatically.  Basic usage is:
 
-* `./qemu.sh` - Run in foreground (serial on stdio — interactive terminal)
-* `./qemu.sh --background` - Run in background (serial redirected to a Unix socket)
-* `./qemu.sh --port 9280` - Custom host port for the REST API, can be used in either foreground or background
-* `./qemu.sh --dry-run` - show the QEMU command (without running it), use to see QEMU configuration that would be used
+* `./qemu.sh` — Run in foreground (serial on stdio — interactive terminal). See [Starting RouterOS](Files/QEMU.md#starting-routeros).
+* `./qemu.sh --background` — Run in background (serial redirected to a Unix socket). See [Background mode](Files/QEMU.md#background-headless).
+* `./qemu.sh --port 9280` — Custom host port for the REST API, usable in foreground or background. See [Changing the Port](Files/QEMU.md#changing-the-port).
+* `./qemu.sh --dry-run` — Show the QEMU command without running it.
 
 #### REST API is exposed on `--port`
 
 The `--port` flag (or `QEMU_PORT` env var) sets the host port forwarded to RouterOS HTTP (port 80).  Once booted, the REST API is available at `http://admin:@localhost:<PORT>/rest/` and WebFig at `http://localhost:<PORT>/`.
 
 > [!NOTE]
-> Unlike UTM where all guest ports are accessible via the shared network, the QEMU scripts expose only a single host port (default `9180`) forwarded to the guest's HTTP port 80 — the RouterOS REST API and WebFig interface.  This is intentional: the scripts are meant for testing and automation, not as a full replacement for UTM's networking.  For full port access, use UTM or configure QEMU networking manually.
+> Unlike UTM where all guest ports are accessible via the shared network, the QEMU scripts expose only a single host port (default `9180`) forwarded to the guest's HTTP port 80 — the RouterOS REST API and WebFig interface.  This is intentional: the scripts are meant for testing and automation, not as a full replacement for UTM's networking.  For full networking options — including forwarding additional ports, vmnet on macOS, and bridge/tap on Linux — see [Networking](Files/QEMU.md#networking) in QEMU.md.
 
 #### Connecting to QEMU `--background` runner
 
-The `./qemu.sh` without argument will bring you into a CHR terminal.  When run in background mode, the CHR serial console with CLI is mapped to a Linux socket, and can be connected via `socat`.  When `./qemu.sh --background` is run launched, it will display the correct command to access the CHR console.  e.g. `socat - UNIX-CONNECT:/tmp/qemu-<machine-name>-serial.sock`
+When run in background mode, the CHR serial console is mapped to a Unix socket.  The launch output shows the exact `socat` command to connect, e.g. `socat - UNIX-CONNECT:/tmp/qemu-<machine-name>-serial.sock`.  A QEMU monitor socket is also available for diagnostics.  See [Accessing RouterOS](Files/QEMU.md#accessing-routeros) for full details including REST API access, SSH forwarding, and serial console examples.
 
 #### Using QEMU from `git clone`
 
@@ -284,11 +287,9 @@ A classic Makefile is used to start `pkl`'s generation of virtual machine packag
 
 #### `./Pkl` - provides the basic framework needed by templates
 
-`UTM.pkl` is the main file here, and enables Pkl code to transform into UTM's `.plist` format.
-UTM supports running VMs under either QEMU or Apple and is controlled via `backend` in Manifests and Templates.
-Additional "application-specific" types, like `CHR.pkl`, know
-download locations, icons, and other specific details of the application.
-Any helpers like randomly generated UUID/MacAddress, live in `Utils.pkl`.  
+`utmzip.pkl` is the root module — it defines all output files for a `.utm` bundle, including `config.plist`, `qemu.cfg`, and `qemu.sh`.  `UTM.pkl` provides UTM-specific types (architectures, backends, network modes).  `QemuCfg.pkl` generates the QEMU launch scripts.
+Additional "application-specific" modules, like `CHR.pkl`, know download locations, icons, and other details specific to that OS image.
+Helpers like deterministic MAC address generation live in `Randomish.pkl`.  
 
 #### `./Manifests` - defines the actual virtual machine images to be "built"
 
