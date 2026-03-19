@@ -145,6 +145,7 @@ function launchScript(
   #   QEMU_ACCEL      — override accelerator (kvm, hvf, tcg)
   #   QEMU_PORT       — override host port for RouterOS HTTP (default: 9180)
   #   QEMU_EXTRA      — additional QEMU arguments appended to command line
+  #   QEMU_NETDEV    — override netdev (replaces default user-mode networking)
   \(if (needsUefi) "#   QEMU_EFI_CODE   — override UEFI code ROM path\n#   QEMU_EFI_VARS   — override UEFI vars template path" else "")
 
   set -eu
@@ -342,7 +343,12 @@ function launchScript(
   # ── Networking ──
   # QEMU --readconfig can define [device] for the NIC but cannot define [netdev]
   # with hostfwd port forwarding (hostfwd is not a --readconfig-supported option).
-  NET_FLAGS="-netdev user,id=net0,hostfwd=tcp::${PORT}-:80"
+  # QEMU_NETDEV replaces the default user-mode networking entirely (for bridge/tap/vmnet).
+  if [ -n "${QEMU_NETDEV:-}" ]; then
+    NET_FLAGS="-netdev $QEMU_NETDEV"
+  else
+    NET_FLAGS="-netdev user,id=net0,hostfwd=tcp::${PORT}-:80"
+  fi
 
   # ── Display / Serial / Monitor ──
   if [ "$BACKGROUND" = "1" ]; then
