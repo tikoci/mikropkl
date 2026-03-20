@@ -1,0 +1,501 @@
+name: "Test: QEMU Guest Agent"
+
+# Verifies QEMU Guest Agent (QGA) support in MikroTik RouterOS CHR.
+# QGA communicates over virtio-serial channel (org.qemu.guest_agent.0).
+#
+# Known status (RouterOS 7.22, agent v2.10.50):
+#   x86_64:  QGA functional — 21 commands supported
+#   aarch64: QGA NOT functional — guest agent does not start on ARM64
+#
+# Tests both machine styles per architecture (no cross-arch):
+#   *.qemu.*  — q35 on x86_64, virt on aarch64
+#   *.apple.* — pc  on x86_64, virt on aarch64
+#
+# ROSE variants are skipped (same image, identical QGA behavior).
+# See Lab/qemu-guest-agent/NOTES.md for full investigation.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rosver:
+        type: string
+        description: 'RouterOS Version (e.g. 7.22, 7.22rc2, 7.22beta4, stable)'
+        required: true
+        default: "stable"
+      pklversion:
+        type: string
+        description: 'pkl Version'
+        required: true
+        default: "0.30.2"
+
+jobs:
+  # ── Phase 1: build machine bundles ────────────────────────────────────────
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      chr-version: ${{ steps.resolve-version.outputs.version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          echo "::group::apt-get install"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends qemu-utils wget make unzip
+          echo "::endgroup::"
+
+      - name: Install Apple pkl
+        run: |
+          curl -fsSL -o pkl "https://github.com/apple/pkl/releases/download/${{ inputs.pklversion }}/pkl-linux-amd64"
+          chmod +x pkl && sudo cp pkl /usr/local/bin/pkl
+
+      - name: Resolve RouterOS version
+        id: resolve-version
+        run: |
+          VERSION=$(CHR_VERSION=${{ inputs.rosver }} pkl eval ./Pkl/chr-version.pkl)
+          echo "Resolved RouterOS version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build machine bundles
+        run: make CHR_VERSION=${{ steps.resolve-version.outputs.version }}
+
+      - name: Upload Machines artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Machines
+          path: ./Machines
+          retention-days: 1
+
+  # ── Phase 2: boot each native-arch machine with QGA and verify ────────────
+  test:
+    needs: build
+    name: "qga (${{ matrix.runner }})"
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            runner-arch: x86_64
+          - runner: ubuntu-24.04-arm
+            runner-arch: aarch64
+      fail-fast: false
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Machines artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Machines
+          path: ./Machines
+
+      - name: Install QEMU and tools
+        run: |
+          echo "::group::apt-get install"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            qemu-system-x86 qemu-system-arm qemu-efi-aarch64 ovmf python3 socat curl
+          echo "::endgroup::"
+
+      - name: Log QEMU versions
+        run: |
+          qemu-system-x86_64 --version 2>/dev/null || echo "qemu-system-x86_64 not installed"
+          qemu-system-aarch64 --version 2>/dev/null || echo "qemu-system-aarch64 not installed"
+          uname -m
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+          if [ -w /dev/kvm 2>/dev/null ]; then
+            echo "KVM_AVAIL=1" >> $GITHUB_ENV
+            echo "KVM is available"
+          else
+            echo "KVM_AVAIL=0" >> $GITHUB_ENV
+            echo "::notice::KVM not available — machines will use TCG"
+          fi
+
+      - name: Make qemu.sh scripts executable
+        run: make qemu-chmod
+
+      - name: Create QGA verification script
+        run: |
+          cat > /tmp/qga-verify.py << 'PYEOF'
+          #!/usr/bin/env python3
+          """QGA CI verification for MikroTik RouterOS CHR.
+
+          Connects to a QEMU Guest Agent socket, syncs, lists supported
+          commands, and tests key operations.  Compares the command set
+          against the known baseline from RouterOS 7.22.
+
+          Usage: qga-verify.py SOCKET_PATH ARCH
+            SOCKET_PATH — Unix socket for QGA (chardev)
+            ARCH        — x86_64 or aarch64
+          Exit codes:
+            0 — verification passed (or QGA expected-absent on aarch64)
+            1 — verification failed
+          """
+          import json, socket, base64, sys, time
+
+          # Known command set: RouterOS 7.22, x86_64, agent v2.10.50
+          KNOWN_COMMANDS = {
+              "guest-exec", "guest-exec-status",
+              "guest-file-close", "guest-file-flush", "guest-file-open",
+              "guest-file-read", "guest-file-write",
+              "guest-fsfreeze-freeze", "guest-fsfreeze-status", "guest-fsfreeze-thaw",
+              "guest-get-host-name", "guest-get-osinfo", "guest-get-time",
+              "guest-get-timezone", "guest-info", "guest-network-get-interfaces",
+              "guest-ping", "guest-set-time", "guest-shutdown",
+              "guest-sync", "guest-sync-delimited",
+          }
+
+
+          class QGA:
+              """Minimal QGA client over Unix socket."""
+              def __init__(self, path, timeout=15):
+                  self.timeout = timeout
+                  self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                  self.s.settimeout(timeout)
+                  self.s.connect(path)
+
+              def cmd(self, execute, args=None, timeout=None):
+                  msg = {"execute": execute}
+                  if args:
+                      msg["arguments"] = args
+                  self.s.sendall((json.dumps(msg) + "\n").encode())
+                  t = timeout or self.timeout
+                  buf = b""
+                  deadline = time.monotonic() + t
+                  while time.monotonic() < deadline:
+                      self.s.settimeout(max(0.1, deadline - time.monotonic()))
+                      try:
+                          chunk = self.s.recv(65536)
+                      except socket.timeout:
+                          continue
+                      if not chunk:
+                          raise RuntimeError("connection closed")
+                      buf += chunk
+                      for line in buf.replace(b"\xff", b"").split(b"\n"):
+                          line = line.strip()
+                          if line:
+                              try:
+                                  return json.loads(line)
+                              except json.JSONDecodeError:
+                                  continue
+                  raise TimeoutError(f"no response in {t}s")
+
+              def close(self):
+                  self.s.close()
+
+
+          def main():
+              if len(sys.argv) < 3:
+                  print(f"Usage: {sys.argv[0]} SOCKET_PATH ARCH", file=sys.stderr)
+                  return 2
+
+              sock_path, arch = sys.argv[1], sys.argv[2]
+              failures = 0
+
+              # ── Connect and sync ──
+              try:
+                  q = QGA(sock_path)
+              except (ConnectionRefusedError, FileNotFoundError, OSError) as e:
+                  if arch != "x86_64":
+                      print(f"  \u229B QGA socket not available on {arch} ({e})")
+                      return 0
+                  print(f"  \u2717 Cannot connect to QGA socket on {arch}: {e}")
+                  return 1
+
+              try:
+                  r = q.cmd("guest-sync-delimited", {"id": 42})
+                  if r.get("return") != 42:
+                      raise RuntimeError(f"unexpected sync response: {r}")
+                  print(f"  \u2713 QGA sync OK")
+              except Exception as e:
+                  q.close()
+                  if arch != "x86_64":
+                      print(f"  \u229B QGA not available on {arch} (expected): {e}")
+                      return 0
+                  print(f"  \u2717 QGA sync failed on {arch}: {e}")
+                  return 1
+
+              # ── guest-info: list supported commands ──
+              try:
+                  info = q.cmd("guest-info")
+                  ver = info.get("return", {}).get("version", "?")
+                  cmds = sorted(
+                      c["name"] for c in
+                      info.get("return", {}).get("supported_commands", [])
+                  )
+                  print(f"  \u2713 guest-info: agent v{ver}, {len(cmds)} commands")
+                  for c in cmds:
+                      print(f"      {c}")
+              except Exception as e:
+                  print(f"  \u2717 guest-info: {e}")
+                  q.close()
+                  return 1
+
+              # ── Compare against known baseline ──
+              actual = set(cmds)
+              missing = KNOWN_COMMANDS - actual
+              extra = actual - KNOWN_COMMANDS
+              if missing:
+                  print(f"  \u26A0 Missing vs 7.22 baseline: {', '.join(sorted(missing))}")
+              if extra:
+                  print(f"  \u2139 New vs 7.22 baseline: {', '.join(sorted(extra))}")
+              if not missing and not extra:
+                  print(f"  \u2713 Command set matches 7.22 baseline ({len(KNOWN_COMMANDS)})")
+
+              # ── Test read-only commands ──
+              for cmd_name in [
+                  "guest-ping", "guest-get-host-name", "guest-get-osinfo",
+                  "guest-get-time", "guest-get-timezone",
+                  "guest-network-get-interfaces",
+              ]:
+                  try:
+                      r = q.cmd(cmd_name)
+                      if "error" in r:
+                          desc = r["error"].get("desc", str(r["error"]))
+                          print(f"  \u2717 {cmd_name}: {desc}")
+                          failures += 1
+                      else:
+                          val = r.get("return", "")
+                          if isinstance(val, dict):
+                              val = json.dumps(val, default=str)[:120]
+                          elif isinstance(val, list):
+                              val = f"[{len(val)} items]"
+                          print(f"  \u2713 {cmd_name}: {val}")
+                  except Exception as e:
+                      print(f"  \u2717 {cmd_name}: {e}")
+                      failures += 1
+
+              # ── Test guest-exec (RouterOS script via input-data) ──
+              try:
+                  script = ':put [/system resource get version]'
+                  r = q.cmd("guest-exec", {
+                      "input-data": base64.b64encode(script.encode()).decode(),
+                      "capture-output": True,
+                  })
+                  pid = r["return"]["pid"]
+                  time.sleep(2)
+                  st = q.cmd("guest-exec-status", {"pid": pid})
+                  ret = st.get("return", {})
+                  if ret.get("exited"):
+                      out = base64.b64decode(
+                          ret.get("out-data", "")
+                      ).decode(errors="replace").strip()
+                      code = ret.get("exitcode", -1)
+                      print(f"  \u2713 guest-exec: {out!r} (exit={code})")
+                  else:
+                      print(f"  \u2717 guest-exec: process did not exit in time")
+                      failures += 1
+              except Exception as e:
+                  print(f"  \u2717 guest-exec: {e}")
+                  failures += 1
+
+              # ── Test file roundtrip (write, read back, verify) ──
+              fname = "qga-ci-test.txt"
+              try:
+                  h = q.cmd("guest-file-open",
+                            {"path": fname, "mode": "w"})["return"]
+                  q.cmd("guest-file-write", {
+                      "handle": h,
+                      "buf-b64": base64.b64encode(b"ci-ok\n").decode(),
+                  })
+                  try:
+                      q.cmd("guest-file-close", {"handle": h}, timeout=3)
+                  except TimeoutError:
+                      pass  # close may not return a JSON response
+
+                  h2 = q.cmd("guest-file-open",
+                             {"path": fname, "mode": "r"})["return"]
+                  rd = q.cmd("guest-file-read", {"handle": h2, "count": 4096})
+                  content = base64.b64decode(
+                      rd["return"]["buf-b64"]
+                  ).decode(errors="replace")
+                  try:
+                      q.cmd("guest-file-close", {"handle": h2}, timeout=3)
+                  except TimeoutError:
+                      pass
+
+                  if content == "ci-ok\n":
+                      print(f"  \u2713 guest-file roundtrip: OK")
+                  else:
+                      print(f"  \u2717 guest-file roundtrip: got {content!r}")
+                      failures += 1
+              except Exception as e:
+                  print(f"  \u2717 guest-file roundtrip: {e}")
+                  failures += 1
+
+              # ── Test fsfreeze cycle ──
+              try:
+                  q.cmd("guest-fsfreeze-freeze")
+                  time.sleep(0.5)
+                  q.cmd("guest-fsfreeze-status")
+                  q.cmd("guest-fsfreeze-thaw")
+                  print(f"  \u2713 guest-fsfreeze: freeze/status/thaw OK")
+              except Exception as e:
+                  print(f"  \u2717 guest-fsfreeze: {e}")
+                  failures += 1
+
+              q.close()
+
+              if arch != "x86_64" and failures == 0:
+                  print(f"  \u2139 QGA available on {arch} (not expected before 7.22)")
+
+              return 1 if failures > 0 else 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main())
+          PYEOF
+          chmod +x /tmp/qga-verify.py
+
+      - name: "Verify QGA support"
+        env:
+          CHR_VERSION: ${{ needs.build.outputs.chr-version }}
+        run: |
+          RUNNER_ARCH="${{ matrix.runner-arch }}"
+          CHR_VER="${{ needs.build.outputs.chr-version }}"
+          PORT_BASE=9180
+          PORT_OFFSET=0
+          FAILED=0
+          PASSED=0
+          RESULTS=""
+
+          for UTM_DIR in Machines/chr.*.utm; do
+            [ -f "$UTM_DIR/qemu.cfg" ] || continue
+            VMNAME=$(basename "$UTM_DIR" .utm)
+
+            # Extract arch and style from name: chr.<arch>.<style>.<version>
+            VM_ARCH=$(echo "$VMNAME" | cut -d. -f2)
+            VM_STYLE=$(echo "$VMNAME" | cut -d. -f3)
+            VM_MACHINE=$(awk '/^\[machine\]/{getline; gsub(/.*= "|"/, ""); print}' "$UTM_DIR/qemu.cfg")
+
+            # Skip non-native arch (no cross-arch testing)
+            if [ "$VM_ARCH" != "$RUNNER_ARCH" ]; then
+              echo "⊘ $VMNAME: skip (arch=$VM_ARCH, runner=$RUNNER_ARCH)"
+              continue
+            fi
+
+            echo "::group::$VMNAME ($VM_STYLE, $VM_MACHINE)"
+            echo "  Machine: $VM_MACHINE ($VM_STYLE backend)"
+
+            PORT=$((PORT_BASE + PORT_OFFSET))
+            PORT_OFFSET=$((PORT_OFFSET + 1))
+            QGA_SOCK="/tmp/qga-${VMNAME}.sock"
+
+            # ── Determine accelerator and boot timeout ──
+            if [ "$KVM_AVAIL" = "1" ]; then
+              TIMEOUT_ATTEMPTS=6     # 30s
+            else
+              TIMEOUT_ATTEMPTS=12    # 60s
+            fi
+
+            # ── Clean stale files ──
+            rm -f "/tmp/qemu-${VMNAME}.pid" "/tmp/qemu-${VMNAME}.log" \
+                  "/tmp/qemu-${VMNAME}-serial.sock" "/tmp/qemu-${VMNAME}-monitor.sock" \
+                  "/tmp/qemu-${VMNAME}-vars.fd" "$QGA_SOCK"
+
+            # ── Boot with QGA virtio-serial channel ──
+            BOOT_START=$(date +%s)
+            QEMU_EXTRA="-device virtio-serial-pci,id=virtio-serial-qga \
+              -chardev socket,id=qga0,path=${QGA_SOCK},server=on,wait=off \
+              -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0,id=qga-port0" \
+              sh "$UTM_DIR/qemu.sh" --background --port "$PORT"
+            sleep 2
+
+            PID_FILE="/tmp/qemu-${VMNAME}.pid"
+            if [ ! -f "$PID_FILE" ]; then
+              echo "::error::$VMNAME: no PID file — QEMU failed to start"
+              cat "/tmp/qemu-${VMNAME}.log" 2>/dev/null | tail -20
+              FAILED=$((FAILED + 1))
+              RESULTS="${RESULTS}  ✗ ${VMNAME} (${VM_MACHINE}): QEMU start failed\n"
+              echo "::endgroup::"
+              continue
+            fi
+            PID=$(cat "$PID_FILE")
+
+            if ! kill -0 "$PID" 2>/dev/null; then
+              echo "::error::$VMNAME: QEMU process exited immediately"
+              cat "/tmp/qemu-${VMNAME}.log" 2>/dev/null | tail -20
+              FAILED=$((FAILED + 1))
+              RESULTS="${RESULTS}  ✗ ${VMNAME} (${VM_MACHINE}): QEMU exited\n"
+              echo "::endgroup::"
+              continue
+            fi
+
+            # ── Wait for RouterOS HTTP (confirms boot) ──
+            BOOTED=0
+            for i in $(seq 1 "$TIMEOUT_ATTEMPTS"); do
+              if ! kill -0 "$PID" 2>/dev/null; then
+                echo "::error::$VMNAME: QEMU died during boot"
+                break
+              fi
+              if curl -sS -m 3 --fail "http://localhost:${PORT}/" > /dev/null 2>&1; then
+                BOOT_ELAPSED=$(( $(date +%s) - BOOT_START ))
+                echo "  RouterOS HTTP up after ${BOOT_ELAPSED}s"
+                BOOTED=1
+                break
+              fi
+              CPU=$(ps -p "$PID" -o %cpu= 2>/dev/null || echo "?")
+              echo "  Boot wait $i/$TIMEOUT_ATTEMPTS (cpu=${CPU}%)"
+              sleep 5
+            done
+
+            if [ "$BOOTED" = "0" ]; then
+              echo "::error::$VMNAME: boot timeout after $((TIMEOUT_ATTEMPTS * 5))s"
+              cat "/tmp/qemu-${VMNAME}.log" 2>/dev/null | tail -20
+              kill "$PID" 2>/dev/null || true
+              sleep 2
+              FAILED=$((FAILED + 1))
+              RESULTS="${RESULTS}  ✗ ${VMNAME} (${VM_MACHINE}): boot timeout\n"
+              echo "::endgroup::"
+              continue
+            fi
+
+            # Give QGA a moment to initialize after RouterOS finishes booting
+            sleep 3
+
+            # ── Run QGA verification ──
+            echo ""
+            echo "── QGA Verification ──"
+            if python3 /tmp/qga-verify.py "$QGA_SOCK" "$VM_ARCH"; then
+              PASSED=$((PASSED + 1))
+              RESULTS="${RESULTS}  ✓ ${VMNAME} (${VM_MACHINE}): QGA verified (${BOOT_ELAPSED}s)\n"
+            else
+              FAILED=$((FAILED + 1))
+              RESULTS="${RESULTS}  ✗ ${VMNAME} (${VM_MACHINE}): QGA failed (${BOOT_ELAPSED}s)\n"
+            fi
+
+            # ── Stop ──
+            kill "$PID" 2>/dev/null || true
+            sleep 2
+            rm -f "$PID_FILE"
+            echo "::endgroup::"
+          done
+
+          # ── Summary (outside ::group:: for visibility) ──
+          echo ""
+          echo "══════════════════════════════════════════════════════════"
+          echo "QGA Results — $RUNNER_ARCH runner (RouterOS $CHR_VER)"
+          echo "  Passed: $PASSED  Failed: $FAILED"
+          echo "══════════════════════════════════════════════════════════"
+          printf "$RESULTS"
+          echo "══════════════════════════════════════════════════════════"
+          [ "$FAILED" -eq 0 ] || exit 1
+
+      - name: Upload QEMU logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qga-logs-${{ matrix.runner }}
+          path: |
+            /tmp/qemu-*.log
+            /tmp/qga-*.json

@@ -515,6 +515,32 @@ completely separate code path from QGA, supporting:
 VMware Tools are irrelevant to QEMU/KVM deployments. Mentioned here only for
 completeness since the user noted prior VMware experience.
 
+## CI Workflow
+
+`.github/workflows/qga-test.yaml` ("Test: QEMU Guest Agent") automates QGA
+verification against any RouterOS version, on both x86_64 and aarch64 runners.
+
+- **Dispatch inputs**: `rosver` (RouterOS version) and `pklversion`
+- **Build job**: builds machine bundles with `make` (same as `qemu-test.yaml`)
+- **Test job**: matrix of `ubuntu-latest` (x86_64) and `ubuntu-24.04-arm` (aarch64)
+- **Machines tested**: `chr.*.qemu.*` (q35/virt) and `chr.*.apple.*` (pc/virt)
+- **No cross-arch**: each runner tests only native-arch machines
+- **ROSE variants skipped**: same CHR image, same QGA behavior
+
+The workflow boots each machine with a QGA virtio-serial channel injected via
+`QEMU_EXTRA`, waits for HTTP (boot confirmation), then runs the embedded
+`qga-verify.py` script which:
+1. Syncs with the guest agent
+2. Lists supported commands (compares against 7.22 baseline)
+3. Tests key commands: ping, hostname, osinfo, time, timezone, network, exec,
+   file roundtrip, fsfreeze cycle
+
+**Exit logic**: x86_64 fails if QGA is absent or tests fail; aarch64 passes
+regardless (QGA absence is expected, presence is a positive note).
+
+**Locally confirmed**: QGA works identically on q35 (qemu style) and pc (apple
+style) — same agent v2.10.50, same 21 commands, all tests pass on both.
+
 ## Future Work
 
 1. **Test on older RouterOS versions** — QGA was introduced in 6.42; command
