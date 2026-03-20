@@ -1,12 +1,12 @@
 
-# `mikropkl` — declarative RouterOS virtual machines with pkl 
+# `mikropkl` — declarative RouterOS virtual machines with `pkl` 
 
 > _Describe a VM in [`pkl`](https://pkl-lang.org), run `make`, get a running RouterOS instance._
 
 `mikropkl` uses [pkl](https://pkl-lang.org) manifests to produce ready-to-run [MikroTik RouterOS CHR](https://help.mikrotik.com/docs/spaces/ROS/pages/18350234) virtual machine packages.  A few lines of pkl declare the architecture, backend, disk layout, and networking — everything else is computed.  Creating a new variant is a one-file `amends` away from an existing template; `make` handles the rest.
 
 
-> [!NOTE]
+> [!TIP]
 >
 > #### <mark>NEW</mark> [ CHR Image Download Picker](https://tikoci.github.io/chr-images.html) 
 > Pick a version, architecture, and type.  The page generates download links and setup instructions for both UTM and QEMU.  _Packages are always in [GitHub Releases](https://github.com/tikoci/mikropkl/releases) too._
