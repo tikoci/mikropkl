@@ -408,6 +408,18 @@ function launchScript(
     NET_FLAGS="-netdev user,id=net0,hostfwd=tcp::${PORT}-:80"
   fi
 
+  # ── Network description (for startup banner) ──
+  if [ -n "${QEMU_NETDEV:-}" ]; then
+    NET_DESC="custom (QEMU_NETDEV)"
+  elif [ -n "$BRIDGE_IFACE" ]; then
+    NET_DESC="vmnet-bridged ($BRIDGE_IFACE) + vmnet-shared"
+  else
+    case "$NET_FLAGS" in
+      *vmnet-shared*) NET_DESC="vmnet-shared (NAT)" ;;
+      *)              NET_DESC="" ;;
+    esac
+  fi
+
   # ── Display / Serial / Monitor ──
   if [ "$BACKGROUND" = "1" ]; then
     SERIAL_SOCK="/tmp/qemu-\(vmName)-serial.sock"
@@ -418,13 +430,10 @@ function launchScript(
     DISPLAY_FLAGS="$DISPLAY_FLAGS -chardev socket,id=serial0,path=$SERIAL_SOCK,server=on,wait=off"
     DISPLAY_FLAGS="$DISPLAY_FLAGS -serial chardev:serial0"
   else
-    # Foreground: serial on stdio using the same explicit chardev pattern as
-    # background mode.  -nographic relies on QEMU's implicit "-serial mon:stdio"
-    # expansion which can silently fail when combined with -nodefaults on some
-    # QEMU versions / accelerators (e.g. HVF on macOS).  Explicit chardev is
-    # identical in behaviour (mux=on gives the Ctrl-a c monitor switch) but
-    # does not depend on QEMU's -nographic post-processing of -nodefaults state.
-    DISPLAY_FLAGS="-display none -chardev stdio,id=serial0,mux=on -mon chardev=serial0,mode=readline -serial chardev:serial0"
+    # Foreground: explicit chardev with mux=on for Ctrl-A escape sequences
+    # (Ctrl-A X = quit, Ctrl-A C = monitor).  signal=off passes Ctrl-C to the
+    # guest (RouterOS) instead of killing the QEMU process.
+    DISPLAY_FLAGS="-display none -chardev stdio,id=serial0,mux=on,signal=off -mon chardev=serial0,mode=readline -serial chardev:serial0"
   fi
 
   # ── Assemble and run ──
@@ -444,14 +453,32 @@ function launchScript(
     exit 0
   fi
 
-  echo "Starting \(vmName) (port $PORT, accel=$ACCEL)..."
   if [ "$BACKGROUND" = "1" ]; then
+    echo "Starting \(vmName) (port $PORT, accel=$ACCEL)..."
     nohup sh -c "exec $CMD" >/tmp/qemu-\(vmName).log 2>&1 &
     echo $! > /tmp/qemu-\(vmName).pid
     echo "QEMU PID=$! — log: /tmp/qemu-\(vmName).log"
     echo "Serial:  socat - UNIX-CONNECT:$SERIAL_SOCK"
     echo "Monitor: socat - UNIX-CONNECT:$MONITOR_SOCK"
   else
+    # ── Foreground startup banner ──
+    if [ -t 1 ] 2>/dev/null; then
+      _B=$(printf '\\033[1m') _D=$(printf '\\033[2m') _R=$(printf '\\033[0m')
+    else
+      _B='' _D='' _R=''
+    fi
+    echo ""
+    echo "  ${_B}\(vmName)${_R}  ${_D}accel=${ACCEL}${_R}"
+    if [ -n "$NET_DESC" ]; then
+      echo "  ${_D}Network:${_R}  $NET_DESC"
+      echo "  ${_D}Access:${_R}   run ${_B}/ip address print${_R} in RouterOS CLI for VM's IP"
+    else
+      echo "  ${_D}WebFig:${_R}   ${_B}http://localhost:${PORT}/${_R}"
+    fi
+    echo "  ${_D}Login:${_R}    admin / no password"
+    echo ""
+    echo "  ${_B}Ctrl-A X${_R}  quit    ${_D}|${_R}  ${_B}Ctrl-A C${_R}  monitor    ${_D}|${_R}  Ctrl-C → RouterOS"
+    echo ""
     exec $CMD
   fi
   """

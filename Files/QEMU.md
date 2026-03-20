@@ -101,9 +101,20 @@ cd ~/Downloads/chr.x86_64.qemu.7.22.utm
 ./qemu.sh
 ```
 
+```
+  chr.x86_64.qemu.7.22  accel=hvf
+  WebFig:   http://localhost:9180/
+  Login:    admin / no password
+
+  Ctrl-A X  quit    |  Ctrl-A C  monitor    |  Ctrl-C → RouterOS
+```
+
 RouterOS serial console appears directly in your terminal.  Default login: **admin** with an empty password (just press Enter).
 
-**Exit:** type `/quit` in the RouterOS CLI, or press `Ctrl-A` then `X`.
+**Exit:** press `Ctrl-A` then `X`.  Or type `/quit` in the RouterOS CLI.
+
+> [!NOTE]
+> `Ctrl-C` is forwarded to RouterOS (it does not kill QEMU).  Use `Ctrl-A X` to exit.
 
 ### Background (headless)
 
@@ -548,7 +559,7 @@ echo "info cpus" | socat - UNIX-CONNECT:/tmp/qemu-chr.x86_64.qemu.7.22-monitor.s
 
 Useful commands: `info block` (disk state), `info network` (netdev/NIC mapping), `info snapshots`, `system_powerdown` (graceful shutdown).
 
-In foreground mode, press `Ctrl-A` then `C` to toggle between the serial console and the QEMU monitor.
+In foreground mode, press `Ctrl-A` then `C` to toggle between the serial console and the QEMU monitor.  `Ctrl-C` is forwarded to RouterOS — use `Ctrl-A X` to quit QEMU.
 
 ---
 
