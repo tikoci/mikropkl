@@ -108,15 +108,20 @@ cd ~/Downloads/chr.x86_64.qemu.7.22.utm
   WebFig:   http://localhost:9180/
   Login:    admin / no password
 
-  Ctrl-A X  quit    |  Ctrl-A C  monitor    |  Ctrl-C → RouterOS
+  Ctrl-A X  quit    |  Ctrl-A C  monitor    |  Ctrl-A H  help
+  Ctrl-C → RouterOS
 ```
 
 RouterOS serial console appears directly in your terminal.  Default login: **admin** with an empty password (just press Enter).
 
-**Exit:** press `Ctrl-A` then `X`.  Or type `/quit` in the RouterOS CLI.
+**Exit:** press `Ctrl-A` then `X`.
 
 > [!NOTE]
 > `Ctrl-C` is forwarded to RouterOS (it does not kill QEMU).  Use `Ctrl-A X` to exit.
+> RouterOS `/quit` returns to the RouterOS login prompt — it does not exit QEMU.
+
+> [!TIP]
+> RouterOS clears the serial console on boot, which scrolls the banner above out of view.  The exit shortcut is also set in the terminal title bar, and you can press `Ctrl-A H` at any time to redisplay QEMU's escape key help.
 
 ### Background (headless)
 
@@ -564,7 +569,7 @@ echo "info cpus" | socat - UNIX-CONNECT:/tmp/qemu-chr.x86_64.qemu.7.22-monitor.s
 
 Useful commands: `info block` (disk state), `info network` (netdev/NIC mapping), `info snapshots`, `system_powerdown` (graceful shutdown).
 
-In foreground mode, press `Ctrl-A` then `C` to toggle between the serial console and the QEMU monitor.  `Ctrl-C` is forwarded to RouterOS — use `Ctrl-A X` to quit QEMU.
+In foreground mode, press `Ctrl-A` then `C` to toggle between the serial console and the QEMU monitor.  `Ctrl-C` is forwarded to RouterOS — use `Ctrl-A X` to quit QEMU.  Press `Ctrl-A H` to see all available escape sequences.
 
 ---
 
@@ -727,7 +732,9 @@ ss -tlnp | grep 9180  # Linux
 
 ## Known Limitations
 
-- **`check-installation` fails on aarch64:** The RouterOS `check-installation` command returns an error on all aarch64 QEMU machines.  This is a known CHR limitation (ARM checker binary behavior) — RouterOS itself works fine.
+- **Execution blocked in UTM sandbox directory:** When a `.utm` bundle is imported via "Open in UTM", macOS applies quarantine attributes (`com.apple.quarantine` with the `0x0004` hard-quarantine flag) to executable files in UTM's sandboxed container (`~/Library/Containers/com.utmapp.UTM/Data/Documents/`).  This blocks `./qemu.sh` with `zsh: operation not permitted` — even `sudo` cannot override it.  **Workaround:** run via the interpreter (`sh ./qemu.sh`) or remove the quarantine attribute (`xattr -d com.apple.quarantine qemu.sh`).  Alternatively, download the ZIP directly and extract to `~/Downloads/` or any non-sandboxed location.  This does not affect UTM itself — UTM runs VMs normally regardless.  
+  >_Likely cause is when UTM imports any QEMU-type machine with a "raw" disk image, UTM converts image to `.qcow2` format - thus a new file is created, and macOS quarantine rules are applied for **new** files, including the new `.qcow2` image. `*.apple.*` images are uneffected by this problem, as the image is **not converted** and remains `.img` after import to UTM, since "raw" is needed by Virtualization.framework (with means the `./qemu.sh` work for `*.apple.*` even when in UTM's "sandbox", QEMU images require the workground.)._
+- **`/system/check-installation` fails on aarch64:** The RouterOS `check-installation` command returns an error on all aarch64 QEMU machines.  This is a known CHR limitation (ARM checker binary behavior) — RouterOS itself works fine.
 - **DHCP server with user-mode networking:** QEMU's SLIRP backend does not pass broadcast traffic, so running a DHCP server in the CHR for external clients requires bridge or tap networking.
 - **Disk size:** The CHR image is 128 MiB.  RouterOS manages its own partition layout — there is no need to resize it for typical use.
 - **x86_64 on ARM64 hosts:** Not viable under TCG emulation (see [Architecture Notes](#architecture-notes)).
