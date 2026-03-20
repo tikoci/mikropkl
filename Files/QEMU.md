@@ -92,6 +92,18 @@ make CHR_VERSION=7.22
 # Output in Machines/chr.x86_64.qemu.7.22.utm/
 ```
 
+When working from a clone, the Makefile provides targets to manage QEMU machines directly:
+
+```sh
+make qemu-list                                                # list machines and running state
+make qemu-run   QEMU_UTM=Machines/chr.x86_64.qemu.7.22.utm   # interactive (foreground)
+make qemu-start QEMU_UTM=Machines/chr.x86_64.qemu.7.22.utm   # headless (background)
+make qemu-stop  QEMU_UTM=Machines/chr.x86_64.qemu.7.22.utm   # stop a background instance
+make qemu-status                                               # debug info for all machines
+make qemu-start-all                                            # start all on ports 9180, 9181, ...
+make qemu-stop-all                                             # stop everything
+```
+
 ---
 
 ## Starting RouterOS
@@ -156,6 +168,22 @@ Background mode writes the PID to `/tmp/qemu-<name>.pid` and provides Unix socke
 ```
 
 Useful for debugging or passing a modified command to QEMU manually.
+
+### Using `make` targets (from a git clone)
+
+When working from the project source, the Makefile wraps `qemu.sh` for convenience:
+
+| Command | Equivalent `qemu.sh` |
+|---|---|
+| `make qemu-run QEMU_UTM=Machines/<name>.utm` | `cd <name>.utm && ./qemu.sh` (foreground) |
+| `make qemu-start QEMU_UTM=Machines/<name>.utm` | `cd <name>.utm && ./qemu.sh --background` |
+| `make qemu-stop QEMU_UTM=Machines/<name>.utm` | `cd <name>.utm && ./qemu.sh --stop` |
+| `make qemu-start-all` | Start all machines on ports 9180, 9181, ... |
+| `make qemu-stop-all` | Stop all running machines |
+| `make qemu-list` | List machines with running/stopped state |
+| `make qemu-status` | Debug info: PIDs, logs, sockets, CPU/memory |
+
+`QEMU_PORT` is passed through — e.g. `make qemu-start QEMU_UTM=... QEMU_PORT=8080`.
 
 ---
 

@@ -124,54 +124,96 @@ BTRFS supports RAID 1 and RAID 10 across those four disks — test software RAID
 
 ## Build locally
 
-The original intent was to use this as part of CI system, like GitHub Actions.
-`mikropkl` will run on macOS desktops too with dev tools.  This is useful since you can create your CHR derivatives.  You'll need the following packages installed first:
+Building from source lets you create CHR derivatives, test custom configurations, and run machines directly from the build directory.
 
-* `make` (either from XCode or "brew install make")
-* `pkl` (either from <https://pkl-lang.org> or "brew install pkl")
-* `git` (optional, other than getting source, "brew install git" or XCode)
-* `qemu-img` (for building machines with extra disks, "brew install qemu")
+### Prerequisites
 
-> `mikropkl` [QEMU runners](Files/QEMU.md#platform-setup) can work with Ubuntu or Debian (adjust for other Linux distros), you'd need:
->
-> * **x86_64**: `sudo apt-get install make pkl git qemu-system-x86`
-> * **aarch64**: `sudo apt-get install make pkl git qemu-system-arm qemu-efi-aarch64`
+**macOS:**
+```sh
+brew install pkl qemu    # pkl + qemu-img (+ qemu-system-* for running)
+```
 
-With those tools, it is only a few steps:
+**Ubuntu / Debian:**
+```sh
+# x86_64 host:
+sudo apt-get install make pkl git qemu-system-x86 qemu-system-arm qemu-efi-aarch64 qemu-utils
+# aarch64 host:
+sudo apt-get install make pkl git qemu-system-arm qemu-efi-aarch64 qemu-utils
+```
 
-  1. Use `git clone https://github.com/tikoci/mikropkl` (or download source from GitHub)
-  2. Change to the directory with source, and run `make`
-  3. In a few minutes, images will be built to the `./Machines` directory (on a one-to-one basis to files in `./Manifests`)
-  4. To add it as an alias to UTM app, use `open ./Machines/<machine_name>`.
+> `make` and `git` are typically pre-installed.  `qemu-img` (from `qemu-utils`) is only needed for ROSE variants (extra qcow2 disks).
 
-The `Makefile` supports some additional helpers to install/uninstall and start/stop all machines in UTM:
+### Build
 
 ```sh
-make utm-version
+git clone https://github.com/tikoci/mikropkl
+cd mikropkl
+make                         # builds all machines (stable channel)
+make CHR_VERSION=7.22        # pin a specific version
+make CHR_VERSION=long-term   # use a release channel
+```
 
-make utm-install
-make utm-start
+Output lands in `Machines/` — one `.utm` directory per manifest in `Manifests/`.
 
-make utm-stop
-make utm-uninstall
+### Run
 
+```sh
+# Interactive (foreground — serial console on stdio):
+make qemu-run QEMU_UTM=Machines/chr.x86_64.qemu.7.22.utm
+
+# Headless (background — serial on Unix socket):
+make qemu-start QEMU_UTM=Machines/chr.x86_64.qemu.7.22.utm
+make qemu-stop  QEMU_UTM=Machines/chr.x86_64.qemu.7.22.utm
+
+# All machines at once (auto-assigned ports 9180, 9181, ...):
+make qemu-start-all
+make qemu-status       # PIDs, logs, sockets, CPU/memory
+make qemu-stop-all
+```
+
+WebFig: `http://localhost:9180/` — REST API: `http://admin:@localhost:9180/rest/`
+
+### Rebuild
+
+```sh
+make clean && make CHR_VERSION=7.22   # rebuild (reuses cached downloads)
+make distclean && make                # full clean including download cache
+```
+
+> Running `make` overwrites all machines in `Machines/`, including disk images.  Any RouterOS state from previous runs is lost.  See [QEMU.md — Disk Image Management](Files/QEMU.md#disk-image-management) for snapshot and overlay strategies.
+
+### UTM (macOS)
+
+```sh
+make utm-install     # open all built .utm bundles in UTM
+make utm-start       # start all VMs via AppleScript
+make utm-stop        # stop all VMs
+make utm-uninstall   # remove all from UTM
 ```
 
 ## Creating new machines
 
-Follow the [Build locally](#build-locally) step first.
+Each file in `Manifests/` produces one machine in `Machines/`.  To create a new variant, copy an existing manifest and adjust:
 
-While a bit complex behind the scenes, creating or re-build machines happens in `/Manifests` - this is where built `/Machines` are born.  There are added layer of abstraction in other directory that allow just a few simple lines to define a VM in this `pkl` approach, with the rest of UTM `.plist` calculated behind the scenes.  
+```sh
+cp Manifests/chr.x86_64.qemu.pkl Manifests/my-router.pkl
+# Edit my-router.pkl — change architecture, backend, disks, etc.
+make
+# Output: Machines/my-router.7.22.utm/
+```
 
-The provided `Makefile` will invoke `pkl` internally and create **_one bundle per file_** in `Manifests`, with resulting virtual machines "building" to `Machines`.  The entire process is done with a simple `make`.  
+Manifests are short — typically 4–6 lines that `amend` a template:
 
-To control the version of CHR used, provide add `CHR_VERSION=<channel|version>`, like `make CHR_VERISON=7.23beta2` or `make CHR_VERSION=long-term`. MikroTik's `stable` channel is default.
+```pkl
+amends "../Templates/chr.utmzip.pkl"
+import "../Pkl/CHR.pkl"
+backend = "QEMU"
+architecture = "aarch64"
+```
 
-All "manifest" are rooted in `./Pkl/utmzip.pkl` which defines the structure needed to produce images.  Pkl's `extends` can be used by any future "middleman" in `./Templates`, or a file in `./Manifests` may directly `amend "./Pkl/utmzip.pkl"` - without a "template" - for simple cases.
+To control the CHR version: `make CHR_VERSION=7.23beta2` or `make CHR_VERSION=long-term`.  MikroTik's `stable` channel is the default.
 
-But adapting to new machine types beyond CHR requires a better understanding of `pkl`.  See <https://pkl-lang.org> for examples and documentation `pkl` syntax and libraries.
-
-> If the goal is to just **"tweak" an existing configuration or create a new variant**, just edit or copy an existing `.pkl` file in `./Manifests` (or remove any you don't want want).  No deep understanding of `pkl` should be needed to edit the `/Manifests`.  Remember that the files in `./Manifest` become `/Machines` on a one-to-one bases by just running `make`.  The rest of the code in `/Pkl` and `/Templates` makes this possible.
+> **Tweaking** an existing configuration doesn't require deep `pkl` knowledge — just edit or copy a file in `Manifests/`.  The complexity lives in `Pkl/` and `Templates/`.  For new machine types beyond CHR, see the [pkl documentation](https://pkl-lang.org).
 
 > [!TIP]
 >
@@ -204,14 +246,18 @@ The `--port` flag (default `9180`) forwards to RouterOS HTTP port 80.  REST API:
 > [!TIP]
 > **The full QEMU deployment guide is [Files/QEMU.md](Files/QEMU.md)** — covering platform setup, networking (port forwarding, vmnet on macOS, bridge/tap on Linux), disk snapshots, multi-instance setups, environment variables, and troubleshooting.
 
-### Using QEMU from `git clone`
+### Makefile QEMU targets
 
-After [building locally](#build-locally), the Makefile provides helpers:
+After [building locally](#build-locally), the Makefile wraps `qemu.sh` for managing machines from the project directory:
 
 ```sh
-make qemu-run QEMU_UTM=Machines/chr.x86_64.qemu.7.22.utm   # start in background
-make qemu-stop QEMU_UTM=Machines/chr.x86_64.qemu.7.22.utm  # stop
-make qemu-list                                               # list all qemu.cfg files
+make qemu-list                                                # machines + running state
+make qemu-run   QEMU_UTM=Machines/chr.x86_64.qemu.7.22.utm   # foreground (interactive)
+make qemu-start QEMU_UTM=Machines/chr.x86_64.qemu.7.22.utm   # background (headless)
+make qemu-stop  QEMU_UTM=Machines/chr.x86_64.qemu.7.22.utm   # stop a background instance
+make qemu-status                                               # debug info: PIDs, logs, sockets
+make qemu-start-all                                            # start all (ports 9180, 9181, ...)
+make qemu-stop-all                                             # stop all running machines
 ```
 
 ## UTM automation

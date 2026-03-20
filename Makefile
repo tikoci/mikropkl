@@ -260,11 +260,20 @@ libvirt-run-qemu:
 QEMU_CFGFILES := $(wildcard ./$(PKL_OUTPUT_DIR)/*.utm/qemu.cfg)
 QEMU_SHFILES := $(wildcard ./$(PKL_OUTPUT_DIR)/*.utm/qemu.sh)
 
-.PHONY: qemu-list qemu-fixpaths qemu-run qemu-stop
+.PHONY: qemu-list qemu-fixpaths qemu-run qemu-start qemu-stop qemu-status qemu-start-all qemu-stop-all
 
-# Show all qemu.cfg files produced by the build
+# Show all QEMU-enabled machines produced by the build
 qemu-list:
-	@for f in $(QEMU_CFGFILES); do echo $$f; done
+	@for f in $(QEMU_CFGFILES); do \
+	  dir=$$(dirname $$f); \
+	  name=$$(basename $$dir .utm); \
+	  pid_file="/tmp/qemu-$$name.pid"; \
+	  if [ -f "$$pid_file" ] && kill -0 $$(cat "$$pid_file") 2>/dev/null; then \
+	    printf "  %-40s  [running]\n" "$$name"; \
+	  else \
+	    printf "  %-40s  [stopped]\n" "$$name"; \
+	  fi; \
+	done
 
 # No-op: qemu.cfg now uses relative paths (./Data/...) and qemu.sh resolves them
 # by changing to its own directory before launching QEMU.
@@ -278,16 +287,93 @@ qemu-chmod:
 	  echo "qemu-chmod: $$f"; \
 	done
 
-# Run a single QEMU machine via its qemu.sh launch script.
+# Run a single QEMU machine interactively (foreground, serial on stdio).
 # QEMU_UTM must be set to the .utm directory path (e.g. Machines/chr.x86_64.qemu.7.22.utm).
 # Passes QEMU_PORT and any extra env vars through to qemu.sh.
+# Exit: Ctrl-A X (quit QEMU).  Ctrl-A C (toggle monitor).  Ctrl-C goes to RouterOS.
 qemu-run: qemu-chmod
+	@test -n "$(QEMU_UTM)" || (echo "Set QEMU_UTM=<path to .utm dir> (e.g. Machines/chr.x86_64.qemu.7.22.utm)" && exit 1)
+	@test -f "$(QEMU_UTM)/qemu.sh" || (echo "No qemu.sh in $(QEMU_UTM)" && exit 1)
+	@sh "$(QEMU_UTM)/qemu.sh" --port "$${QEMU_PORT:-9180}"
+
+# Start a single QEMU machine in the background (headless, serial on Unix socket).
+# QEMU_UTM must be set to the .utm directory path.
+qemu-start: qemu-chmod
 	@test -n "$(QEMU_UTM)" || (echo "Set QEMU_UTM=<path to .utm dir> (e.g. Machines/chr.x86_64.qemu.7.22.utm)" && exit 1)
 	@test -f "$(QEMU_UTM)/qemu.sh" || (echo "No qemu.sh in $(QEMU_UTM)" && exit 1)
 	@sh "$(QEMU_UTM)/qemu.sh" --background --port "$${QEMU_PORT:-9180}"
 
-# Stop a running QEMU instance launched by qemu-run
+# Stop a running QEMU instance launched by qemu-start
 qemu-stop:
 	@test -n "$(QEMU_UTM)" || (echo "Set QEMU_UTM=<path to .utm dir>" && exit 1)
 	@test -f "$(QEMU_UTM)/qemu.sh" || (echo "No qemu.sh in $(QEMU_UTM)" && exit 1)
 	@sh "$(QEMU_UTM)/qemu.sh" --stop
+
+# Start all QEMU machines in the background with auto-assigned ports (9180, 9181, ...).
+qemu-start-all: qemu-chmod
+	@PORT=9180; \
+	for f in $(QEMU_SHFILES); do \
+	  name=$$(basename $$(dirname $$f) .utm); \
+	  echo "Starting $$name on port $$PORT ..."; \
+	  sh "$$f" --background --port $$PORT; \
+	  PORT=$$((PORT + 1)); \
+	done
+
+# Stop all running QEMU machines
+qemu-stop-all:
+	@for f in $(QEMU_SHFILES); do \
+	  name=$$(basename $$(dirname $$f) .utm); \
+	  pid_file="/tmp/qemu-$$name.pid"; \
+	  if [ -f "$$pid_file" ]; then \
+	    sh "$$f" --stop; \
+	  fi; \
+	done
+
+# Show detailed status and debug info for all QEMU machines.
+# Reports PID, process state, log/socket files, and port for each machine.
+qemu-status:
+	@echo ""; \
+	found=0; \
+	for f in $(QEMU_CFGFILES); do \
+	  dir=$$(dirname $$f); \
+	  name=$$(basename $$dir .utm); \
+	  pid_file="/tmp/qemu-$$name.pid"; \
+	  log_file="/tmp/qemu-$$name.log"; \
+	  serial_sock="/tmp/qemu-$$name-serial.sock"; \
+	  monitor_sock="/tmp/qemu-$$name-monitor.sock"; \
+	  vars_file="/tmp/qemu-$$name-vars.fd"; \
+	  echo "  $$name"; \
+	  echo "  $$(printf '%0.s─' $$(seq 1 $${#name}))"; \
+	  if [ -f "$$pid_file" ]; then \
+	    pid=$$(cat "$$pid_file"); \
+	    if kill -0 "$$pid" 2>/dev/null; then \
+	      found=1; \
+	      ps_info=$$(ps -o pid=,pcpu=,rss=,etime= -p "$$pid" 2>/dev/null || echo "$$pid ? ? ?"); \
+	      echo "  PID:      $$pid  (running)"; \
+	      echo "  Process:  $$(echo $$ps_info | awk '{printf "cpu=%s%% rss=%sKB elapsed=%s", $$2, $$3, $$4}')"; \
+	    else \
+	      echo "  PID:      $$pid  (STALE — process not running)"; \
+	    fi; \
+	  else \
+	    echo "  PID:      (not started)"; \
+	  fi; \
+	  printf "  Log:      $$log_file"; \
+	  if [ -f "$$log_file" ]; then \
+	    size=$$(wc -c < "$$log_file" | tr -d ' '); \
+	    echo "  ($$size bytes)"; \
+	  else echo "  (absent)"; fi; \
+	  printf "  Serial:   $$serial_sock"; \
+	  if [ -S "$$serial_sock" ]; then echo "  (active)"; else echo "  (absent)"; fi; \
+	  printf "  Monitor:  $$monitor_sock"; \
+	  if [ -S "$$monitor_sock" ]; then echo "  (active)"; else echo "  (absent)"; fi; \
+	  if [ -f "$$vars_file" ]; then \
+	    echo "  EFI vars: $$vars_file"; \
+	  fi; \
+	  echo ""; \
+	done; \
+	if [ "$$found" = "0" ]; then \
+	  echo "  No machines currently running."; \
+	  echo "  Start one: make qemu-start QEMU_UTM=Machines/<name>.utm"; \
+	  echo "  Start all: make qemu-start-all"; \
+	  echo ""; \
+	fi

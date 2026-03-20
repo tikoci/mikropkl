@@ -389,14 +389,26 @@ pkl eval ./Manifests/*.pkl -m ./Machines
 # Make qemu.sh executable (normally automatic in phase2)
 make qemu-chmod
 
-# Run a QEMU machine via qemu.sh (after build)
+# Run a QEMU machine interactively (foreground, serial on stdio)
 make qemu-run QEMU_UTM=Machines/chr.x86_64.qemu.7.22.utm
+
+# Start a QEMU machine in the background (headless)
+make qemu-start QEMU_UTM=Machines/chr.x86_64.qemu.7.22.utm
 
 # Stop a running QEMU machine
 make qemu-stop QEMU_UTM=Machines/chr.x86_64.qemu.7.22.utm
 
-# List all qemu.cfg files
+# Start all machines (auto-assigned ports 9180, 9181, ...)
+make qemu-start-all
+
+# Stop all running machines
+make qemu-stop-all
+
+# List machines with running/stopped state
 make qemu-list
+
+# Debug info: PIDs, logs, sockets, CPU/memory for all machines
+make qemu-status
 ```
 
 ## Adding a New Machine

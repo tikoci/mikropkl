@@ -103,7 +103,9 @@ Implemented in `Pkl/QemuCfg.pkl`.  Generates `qemu.cfg` (QEMU --readconfig ini) 
 - `qemu.sh` handles: UEFI pflash (aarch64), KVM/HVF/TCG detection, networking
   with port forwarding, macOS vmnet (`--shared`/`--bridge`), display/serial config,
   `--background`/`--dry-run`/`--stop` modes, optional `qemu.env` sourcing
-- Makefile targets: `qemu-list`, `qemu-chmod`, `qemu-run`, `qemu-stop`
+- Makefile targets: `qemu-list`, `qemu-chmod`, `qemu-run` (foreground),
+  `qemu-start` (background), `qemu-stop`, `qemu-status` (debug info),
+  `qemu-start-all`, `qemu-stop-all`
 - `qemu-test.yaml` CI workflow: x86_64 runner boots ALL machines (x86 native via
   KVM, aarch64 cross-arch via TCG ~20s); aarch64 runner boots only native aarch64
   machines (x86 cross-arch abandoned after 16 CI iterations).  Both runners verify

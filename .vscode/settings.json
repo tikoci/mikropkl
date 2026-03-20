@@ -1,5 +1,6 @@
 {
     "chat.tools.terminal.autoApprove": {
-        "pkl": true
+        "pkl": true,
+        "make": true
     }
 }
