@@ -381,6 +381,7 @@ function launchScript(
   MISC_FLAGS=""
   """
   )
+  DOCS_URL="https://github.com/tikoci/mikropkl/blob/main/Files/QEMU.md"
   # ── Networking ──
   # QEMU --readconfig can define [device] for the NIC but cannot define [netdev]
   # with hostfwd port forwarding (hostfwd is not a --readconfig-supported option).
@@ -388,12 +389,17 @@ function launchScript(
   if [ -n "${QEMU_NETDEV:-}" ]; then
     # Explicit QEMU_NETDEV override — use as-is
     NET_FLAGS="-netdev $QEMU_NETDEV"
+    # Warn if user also passed --shared or --bridge (QEMU_NETDEV takes precedence)
+    if [ "$SHARED" = "1" ] || [ -n "$BRIDGE_IFACE" ]; then
+      echo "NOTE: QEMU_NETDEV is set — --shared/--bridge flag ignored." >&2
+    fi
   elif [ -n "$BRIDGE_IFACE" ]; then
     # --bridge <iface>: vmnet-bridged on net0, plus vmnet-shared on net1 (two NICs).
     # Bridged gives LAN access; shared gives a private NAT for management.
     # Requires macOS and root (vmnet.framework).
     if [ "$(uname -s)" != "Darwin" ]; then
-      echo "ERROR: --bridge requires macOS vmnet.framework. On Linux, use QEMU_NETDEV with tap." >&2
+      echo "ERROR: --bridge requires macOS vmnet.framework." >&2
+      echo "  Linux: use QEMU_NETDEV with tap — see ${DOCS_URL}#bridge-networking-linux" >&2
       exit 1
     fi
     NET_FLAGS="-netdev vmnet-bridged,id=net0,ifname=$BRIDGE_IFACE"
@@ -401,7 +407,8 @@ function launchScript(
   elif [ "$SHARED" = "1" ]; then
     # --shared: vmnet-shared NAT (macOS vmnet.framework, requires root)
     if [ "$(uname -s)" != "Darwin" ]; then
-      echo "ERROR: --shared requires macOS vmnet.framework. On Linux, use QEMU_NETDEV." >&2
+      echo "ERROR: --shared requires macOS vmnet.framework." >&2
+      echo "  Linux: use QEMU_NETDEV — see ${DOCS_URL}#networking" >&2
       exit 1
     fi
     NET_FLAGS="-netdev vmnet-shared,id=net0"
@@ -457,25 +464,59 @@ function launchScript(
     exit 0
   fi
 
+  # ── Port conflict check (only for user-mode networking with port forwarding) ──
+  if [ -z "${QEMU_NETDEV:-}" ] && [ "$SHARED" = "0" ] && [ -z "$BRIDGE_IFACE" ]; then
+    _PORT_IN_USE=0
+    if command -v ss >/dev/null 2>&1; then
+      ss -tln 2>/dev/null | grep -q ":${PORT} " && _PORT_IN_USE=1
+    elif command -v lsof >/dev/null 2>&1; then
+      lsof -iTCP:"$PORT" -sTCP:LISTEN -P -n >/dev/null 2>&1 && _PORT_IN_USE=1
+    fi
+    if [ "$_PORT_IN_USE" = "1" ]; then
+      echo "ERROR: Port ${PORT} is already in use." >&2
+      echo "  Try: ./qemu.sh --port $((PORT + 1))" >&2
+      echo "  See: ${DOCS_URL}#port-conflict" >&2
+      exit 1
+    fi
+  fi
+
+  # ── ANSI formatting (shared by foreground and background banners) ──
+  if [ -t 1 ] 2>/dev/null; then
+    _B=$(printf '\\033[1m') _D=$(printf '\\033[2m') _R=$(printf '\\033[0m')
+    _G=$(printf '\\033[32m') _Y=$(printf '\\033[33m')
+  else
+    _B='' _D='' _R='' _G='' _Y=''
+  fi
+  case "$ACCEL" in
+    kvm|hvf) _ACCEL_TAG="${_G}accelerated${_R}" ;;
+    *)       _ACCEL_TAG="${_Y}emulated${_R}" ;;
+  esac
+
   if [ "$BACKGROUND" = "1" ]; then
-    echo "Starting \(vmName) (port $PORT, accel=$ACCEL)..."
     nohup sh -c "exec $CMD" >/tmp/qemu-\(vmName).log 2>&1 &
     echo $! > /tmp/qemu-\(vmName).pid
-    echo "QEMU PID=$! — log: /tmp/qemu-\(vmName).log"
-    echo "Serial:  socat - UNIX-CONNECT:$SERIAL_SOCK"
-    echo "Monitor: socat - UNIX-CONNECT:$MONITOR_SOCK"
-  else
-    # ── Foreground startup banner ──
-    if [ -t 1 ] 2>/dev/null; then
-      _B=$(printf '\\033[1m') _D=$(printf '\\033[2m') _R=$(printf '\\033[0m')
+    echo ""
+    echo "  ${_B}\(vmName)${_R}  ${_D}accel=${ACCEL}${_R} ${_ACCEL_TAG}"
+    if [ -n "$NET_DESC" ]; then
+      echo "  ${_D}Network:${_R}  $NET_DESC"
+      echo "  ${_D}Access:${_R}   run ${_B}/ip address print${_R} in RouterOS CLI for VM's IP"
     else
-      _B='' _D=''  _R=''
+      echo "  ${_D}WebFig:${_R}   ${_B}http://localhost:${PORT}/${_R}"
     fi
+    echo "  ${_D}Login:${_R}    admin / no password"
+    echo ""
+    echo "  ${_D}PID:${_R}      $!"
+    echo "  ${_D}Log:${_R}      /tmp/qemu-\(vmName).log"
+    echo "  ${_D}Serial:${_R}   ${_B}socat - UNIX-CONNECT:$SERIAL_SOCK${_R}"
+    echo "  ${_D}Monitor:${_R}  socat - UNIX-CONNECT:$MONITOR_SOCK"
+    echo "  ${_D}Stop:${_R}     ${_B}./qemu.sh --stop${_R}"
+    echo ""
+  else
     # Set terminal title — persists after RouterOS clears the screen, so
     # the exit shortcut remains visible in the tab/title bar.
     printf '\\033]0;%s\\007' "\(vmName) — Ctrl-A X quit"
     echo ""
-    echo "  ${_B}\(vmName)${_R}  ${_D}accel=${ACCEL}${_R}"
+    echo "  ${_B}\(vmName)${_R}  ${_D}accel=${ACCEL}${_R} ${_ACCEL_TAG}"
     if [ -n "$NET_DESC" ]; then
       echo "  ${_D}Network:${_R}  $NET_DESC"
       echo "  ${_D}Access:${_R}   run ${_B}/ip address print${_R} in RouterOS CLI for VM's IP"

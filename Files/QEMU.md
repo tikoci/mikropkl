@@ -104,7 +104,7 @@ cd ~/Downloads/chr.x86_64.qemu.7.22.utm
 ```
 
 ```
-  chr.x86_64.qemu.7.22  accel=hvf
+  chr.x86_64.qemu.7.22  accel=hvf accelerated
   WebFig:   http://localhost:9180/
   Login:    admin / no password
 
@@ -131,13 +131,18 @@ cd ~/Downloads/chr.x86_64.qemu.7.22.utm
 ```
 
 ```
-Starting chr.x86_64.qemu.7.22 (port 9180, accel=hvf)...
-QEMU PID=54321 — log: /tmp/qemu-chr.x86_64.qemu.7.22.log
-Serial:  socat - UNIX-CONNECT:/tmp/qemu-chr.x86_64.qemu.7.22-serial.sock
-Monitor: socat - UNIX-CONNECT:/tmp/qemu-chr.x86_64.qemu.7.22-monitor.sock
+  chr.x86_64.qemu.7.22  accel=hvf accelerated
+  WebFig:   http://localhost:9180/
+  Login:    admin / no password
+
+  PID:      54321
+  Log:      /tmp/qemu-chr.x86_64.qemu.7.22.log
+  Serial:   socat - UNIX-CONNECT:/tmp/qemu-chr.x86_64.qemu.7.22-serial.sock
+  Monitor:  socat - UNIX-CONNECT:/tmp/qemu-chr.x86_64.qemu.7.22-monitor.sock
+  Stop:     ./qemu.sh --stop
 ```
 
-Background mode writes the PID to `/tmp/qemu-<name>.pid` and provides Unix sockets for serial console and QEMU monitor access.
+Background mode writes the PID to `/tmp/qemu-<name>.pid` and provides Unix sockets for serial console and QEMU monitor access.  Use `./qemu.sh --stop` to terminate QEMU running CHR.
 
 **Stop:**
 ```sh
