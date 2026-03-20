@@ -68,6 +68,9 @@ UTM is available from:
 
 See UTM's [documentation](https://docs.getutm.app) or [website](https://mac.getutm.app) for more details.
 
+> [!TIP]
+> **New to using CHR with UTM?**  [Files/UTM.md](Files/UTM.md) is a user-facing guide covering networking modes, console access, automation, VM configuration, and how UTM settings map to QEMU — oriented toward network admins who work with RouterOS regularly.
+
 ## Downloading virtual machines from GitHub
 
 The framework here is pretty agnostic, so while a similar approach works for more common things like Alpine or Ubuntu.  There is only one class of machine today, RouterOS.
