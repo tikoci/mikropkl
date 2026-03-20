@@ -91,6 +91,8 @@ jobs:
           tag_name: ${{ github.event.inputs.tagprefix }}${{ needs.build.outputs.chr-version }} 
           release_name: ${{ github.event.inputs.releaseprefix }} ${{ needs.build.outputs.chr-version }} 
           body: |
+            > Download any version at **[tikoci.github.io/chr-images](https://tikoci.github.io/chr-images)** with help included.
+
             UTM virtual machines with RouterOS CHR ${{ needs.build.outputs.chr-version }} 
             built using `pkl` ${{ github.event.inputs.pklversion }}
 
@@ -171,8 +173,6 @@ jobs:
             will launch in UTM, like any other macOS "document".  
 
             #### QEMU launch scripts
-            Each QEMU-backend `.utm` bundle includes `qemu.sh` and `qemu.cfg` for running
-            the VM directly under QEMU — on macOS or Linux — without UTM installed.
-            See [QEMU deployment guide](https://github.com/${{ github.repository }}/blob/main/Files/QEMU.md) or the [README](https://github.com/${{ github.repository }}#qemu-launch-scripts) for details.
+            Each bundle includes `qemu.sh` + `qemu.cfg` for direct QEMU use on macOS or Linux — no UTM needed. See [QEMU.md](https://github.com/${{ github.repository }}/blob/main/Files/QEMU.md) for details.
 
 
