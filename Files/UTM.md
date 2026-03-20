@@ -9,20 +9,23 @@
 
 ## Installing UTM
 
-Download UTM once.  It runs all packages.
+Install UTM once — it runs all packages.
 
-- **Mac App Store** — [UTM Virtual Machines](https://apps.apple.com/us/app/utm-virtual-machines/id1538878817?mt=12) (sandbox mode; updates via App Store)
-- **Direct download** — [UTM.dmg from GitHub](https://github.com/utmapp/UTM/releases/latest/download/UTM.dmg) (unsigned; drag to /Applications)
+```sh
+brew install --cask utm
+```
 
-Both editions run CHR identically.  The App Store edition runs in a sandbox which may affect where UTM stores VMs and how it accesses /dev/kvm on Linux.  The GitHub edition is the build used in most documentation.
+> No Homebrew?  Install it first: [brew.sh](https://brew.sh).  Alternatives: [UTM.dmg from GitHub](https://github.com/utmapp/UTM/releases/latest/download/UTM.dmg) (free, unsigned; drag to /Applications) or [Mac App Store](https://apps.apple.com/us/app/utm-virtual-machines/id1538878817?mt=12) (sandbox mode; updates via App Store).  All editions run CHR identically.
 
 ---
 
 ## Getting a CHR Package
 
+The easiest way to grab a package is the [CHR Images](https://tikoci.github.io/chr-images.html) page — pick a version, architecture, and type, and it generates the download link and platform-specific instructions for you.  Or use the methods below directly.
+
 ### One-click install
 
-Find a `utm://downloadVM?url=…` link in [GitHub Releases](https://github.com/tikoci/mikropkl/releases), paste it into a new browser tab or run from Terminal:
+Find a `utm://downloadVM?url=…` link in [GitHub Releases](https://github.com/tikoci/mikropkl/releases) or on the [CHR Images](https://tikoci.github.io/chr-images.html) page, paste it into a new browser tab or run from Terminal:
 
 ```sh
 open 'utm://downloadVM?url=https%3A%2F%2Fgithub.com%2F...'

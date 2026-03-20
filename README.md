@@ -1,151 +1,126 @@
 
-# `mikropkl` virtual machine packager
+# `mikropkl` — declarative RouterOS virtual machines with pkl 
 
-> _or... a proof-of-concept using `pkl` to build macOS virtual machines, using RouterOS as the ginny pig._
+> _Describe a VM in [`pkl`](https://pkl-lang.org), run `make`, get a running RouterOS instance._
 
-[UTM](https://mac.getutm.app) is an open-source app enabling both Apple and QEMU-based machine virtualization for macOS.  In UTM, a virtual machine is just a folder ending in .utm (_i.e._ "package bundle"), with
-a `config.plist` and subdirectory `Data` containing virtual disk(s) or other metadata like an icon.
-This project produces a valid UTM document package bundle automatically based on [`pkl` files](https://pkl-lang.org).
-
-The created bundle contains a virtualized OS that can be installed into UTM in a few ways:
-
-* Via app URL, `utm://downloadVM?...`, which downloads and installs a VM into UTM's default store
-* Download ZIP from GitHub, then just open the "document" in Finder -  this will create an "alias" in the UTM app to the location where you opened the UTM package
-* `git clone` (or fork) this project and build locally - then copy or run as desired from the `Machines` directory.
-
-> [!NOTE]
->
-> **Ready-to-use CHR packages are in GitHub's [Releases](https://github.com/tikoci/mikropkl/releases)**.  
-> Installation instructions - including `utm://downloadVM?...` URLs are included in each GitHub Release.
-
-UTM supports two modes of virtualization:
-
-* [_QEMU_](https://docs.getutm.app/settings-qemu/settings-qemu/) (`QEMU`)
-  * support both emulation and virtualization, so ARM can be emulated on Intel, or use direct virtualization if on the same platform.
-  * USB device support and a wider range of network adapters available
-  * images marked with "QEMU"
-* [_Apple Virtualization Framework_](https://docs.getutm.app/settings-apple/settings-apple/) (`Apple`)
-  * more limited support for devices and options
-  * quicker startup than QEMU
-  * images marked with "Apple"
-
-Both modes are supported in `pkl` "manifests" and "templates", expressed as the `backend` property in Pkl code.
-
-Additionally, there are a few network modes:
-
-* `Shared`
-  * virtual machine use network (subnet) local to macOS
-  * Internet connections from guest OSes are NATed by Apple/QEMU from the "shared" network to the real interface
-  * QEMU supports port forwarding from a guest machine.  Apple Virtualization does not, so a `Bridged` network must be used if ports need to be exposed to networks beyond the local Mac.
-* `Bridged`
-  * virtual machine is bound to a macOS interface
-  * still "shared" with macOS, but the machine presents its own MAC on the bridged network
-  * can use ethernet dongle(s) as bridge interfaces to separate networks
-* `HostOnly` (_using `QEMU` only, no `Apple`_) - Local Mac, No Internet
-  * similar to `Shared`, except no internet access is possible
-  * no NAT nor default gateway
-  * only available when `backend` is `QEMU`
-
-There are some differences in network between Apple Virtualization and QEMU modes.  See specific docs for [QEMU](https://docs.getutm.app/settings-qemu/devices/network/network/) or [Apple](https://docs.getutm.app/settings-apple/devices/network/) for more details on virtual networking.
-
-> All CHR bundles included [QEMU launch scripts](#qemu-launch-scripts) that allow simple localhost testing without UTM and work on Mac and Linux.  For Mac, shared and bridged options supported.  For lLnux, only port forwarding to REST API via socket without additional Linux networking configuration.
+`mikropkl` uses [pkl](https://pkl-lang.org) manifests to produce ready-to-run [MikroTik RouterOS CHR](https://help.mikrotik.com/docs/spaces/ROS/pages/18350234) virtual machine packages.  A few lines of pkl declare the architecture, backend, disk layout, and networking — everything else is computed.  Creating a new variant is a one-file `amends` away from an existing template; `make` handles the rest.
 
 
 > [!NOTE]
-> Using a Mac's Wi-Fi adapter may introduce some jitter in network traffic.  **For maximum bandwidth and more predictable latency use Ethernet.** The issue is noticeable mainly in speed tests, where you'll see the variable speed (and latency). On RouterOS, adding a fq_codel or similar queue helps "smooth" traffic in high-bandwidth tests when using Wi-Fi as a VM network interface.  _And, likely a good way to "play with queues", since just using a Wi-Fi adapter will produce something to see the effects of queuing._
+>
+> #### <mark>NEW</mark> [ CHR Image Download Picker](https://tikoci.github.io/chr-images.html) 
+> Pick a version, architecture, and type.  The page generates download links and setup instructions for both UTM and QEMU.  _Packages are always in [GitHub Releases](https://github.com/tikoci/mikropkl/releases) too._
 
-All built packages support UTM's [Headless Mode](https://docs.getutm.app/advanced/headless/). Two serial ports are added, the "built-in Terminal" and a "pseudo-tty" serial port.   These allow direct console access and serial-based automation, respectively.  To use in Headless Mode, the "built-in Terminal" will have to be removed.  No virtual display is connected by default.
 
-All of UTM's settings can be manifested by the `.pkl` scripts in the [tikoci/mikropkl](https://github.com/tikoci/mikropkl) repo. Essentially converting friendly Pkl code into the needed `config.plist` file, with download disk images provided by the [`Makefile`](https://github.com/tikoci/mikropkl/blob/main/Makefile), and finally packaged by a [GitHub Action](https://github.com/tikoci/mikropkl/blob/main/.github/workflows/chr.yaml).  
+Each package is a `.utm` bundle — a folder that [UTM](https://mac.getutm.app) opens directly on macOS.  Inside the same bundle, `qemu.sh` + `qemu.cfg` let you run the VM under QEMU on macOS or Linux without UTM.  Pick what fits: GUI on Mac, headless on a server, CI in GitHub Actions. _The "`.utm` bundle" is really just a ZIP file, and on Linux, just a <del>folder</del> directory that ends in `.utm` when extracted._
 
-## Installing UTM on macOS
+> QEMU launch scripts were added in 7.22 to `mikropkl` builds.  Older releases do not have QEMU scripts, `qemu.sh` and `qemu.cfg`.  If one is needed, file an [GitHub issue](https://github.com/tikoci/mikropkl/issues) or [build locally](#build-locally) using `make`.
 
-This projects just build _UTM_ virtual machines, UTM has to be installed to actually run any packaged machines.
-UTM is available from:
 
-* Mac App Store:  <https://apps.apple.com/us/app/utm-virtual-machines/id1538878817?mt=12>
-* GitHub: <https://github.com/utmapp/UTM/releases/latest/download/UTM.dmg>
+## Getting Started
 
-See UTM's [documentation](https://docs.getutm.app) or [website](https://mac.getutm.app) for more details.
+> [!NOTE]
+> **Homebrew** is used to install both UTM and QEMU.  If you don't have it: [brew.sh](https://brew.sh).
+
+### macOS (UTM)
+
+```sh
+brew install --cask utm
+```
+
+Open a package from the [CHR Images](https://tikoci.github.io/chr-images.html) page — it provides both a **Download ZIP** button and an **Open in UTM** link that imports the VM directly.
+
+> Alternatives: [UTM.dmg from GitHub](https://github.com/utmapp/UTM/releases/latest/download/UTM.dmg) (free, unsigned) or [Mac App Store](https://apps.apple.com/us/app/utm-virtual-machines/id1538878817?mt=12) (sandbox mode).  All editions run CHR identically.
+
+UTM supports two backends: **QEMU** (cross-architecture emulation, USB pass-through, wider networking) and **Apple Virtualization** (faster startup, native performance, macOS-only). _`*.apple.*` packages use EFI on X86, needed Apple's Virtualization.framework, but work under Linux and QEMU using EFI boot there too. `*.qemu.*` packages always use SeaBIOS and standard RouterOS image._
+
+Default credentials: **admin** with an empty password.  All bundles default to **Shared** networking (NAT) with RouterOS on `192.168.64.0/24`.
 
 > [!TIP]
-> **New to using CHR with UTM?**  [Files/UTM.md](Files/UTM.md) is a user-facing guide covering networking modes, console access, automation, VM configuration, and how UTM settings map to QEMU — oriented toward network admins who work with RouterOS regularly.
+> **New to UTM + RouterOS?**  The [UTM Guide](Files/UTM.md) covers networking modes, console access, multi-VM topologies, automation, and how UTM settings map to QEMU — oriented toward network admins who use RouterOS regularly.
 
-## Downloading virtual machines from GitHub
+### macOS or Linux (QEMU)
 
-The framework here is pretty agnostic, so while a similar approach works for more common things like Alpine or Ubuntu.  There is only one class of machine today, RouterOS.
-
-### Several options to install machines into UTM
-
-> Quickest may be to "cut" the URL from [Releases](https://github.com/tikoci/mikropkl/releases) and "paste" into a new browser tab, which will invoke Mac's URL scheme to launch UTM with import details when opened. <small>(GitHub only allows `https://` URLs in it's web ages...why the extra "cut-and-paste")</small>
-
-#### Using `utm://` in Terminal's `open`
-
-On macOS, with [UTM](https://mac.getutm.app), install
-
-1. Launch "Terminal"
-2. Type `open '<utm_app_url>'`, replacing _utm_app_url_ with a `utm://...` link shown in [Releases](https://github.com/tikoci/mikropkl/releases) - _make sure to 'single quote URL'_
-3. UTM will open and prompt you if you want to download the machine
-4. If accepted, the machine will be stored in UTM's default document directory
-5. Use UTM to start the image, and a new window with a terminal to the machine will appear
-
-#### Just download the ZIP to control the location of the machine
-
-The download links in [Releases](https://github.com/tikoci/mikropkl/releases) contain a UTM package inside a ZIP file.  When expanded,
-assuming [UTM](https://mac.getutm.app) is installed, the folder ending in `.utm`
-will launch in UTM, like any other macOS "document".  
-
-> The GitHub Action that builds packages uses a `git tag` based on "machine class".  This is used to identify different releases in GitHub's Releases.  For example, RouterOS "CHR" packages are prefixed with `chr-`, like `chr-7.19beta4`.  This scheme allows additional machine classes in future.
-
-### MikroTik RouterOS "CHR" Packages (`*.chr.*.utm`)
-
-**See [Releases](https://github.com/tikoci/mikropkl/releases) section on GitHub for downloads.  Installation instructions are in the release notes.**
-
-RouterOS documentation is available at <https://help.mikrotik.com/docs>, with Mikrotik's [Forum](https://forum.mikrotik.com) being an additional source for RouterOS usage details.
-
-#### "Free" CHR is limited to 1Mb/s
-
-The CHR packages contain no license, so they run in "free" mode.  The free license level allows CHR to run indefinitely but is limited to 1Mb/s upload per interface.  All features provided by CHR are available without restrictions, other than speed.  There is a "trial" mode – which is also free – but you need to register at <https://www.mikrotik.com/client> to generate a trial license in CHR.  With a valid account, the trial mode can be activated using CHR's terminal, provide <www.mikrotik.com> "account" (user) and password when prompted:
-
-```routeros
-/system/license/renew level=p10 
+```sh
+brew install qemu          # macOS
+# or: sudo apt-get install qemu-system-x86 qemu-utils   # Ubuntu/Debian x86_64
 ```
 
-This will remove the 1Mb/s limit, and allow up 10Gb/s, with only restriction is upgrades are not possible after 60 days without a paid license.  See Mikrotik's [CHR documentation](https://help.mikrotik.com/docs/spaces/ROS/pages/18350234/Cloud+Hosted+Router+CHR#CloudHostedRouter%2CCHR-Freelicenses) for licensing details.
+Download a package from the [CHR Images](https://tikoci.github.io/chr-images.html) page, then:
 
-> `/ip/cloud` features, like DDNS and "BackToHome", require a paid license, and while all other features are included in the "free"/"trial" mode, `/ip/cloud` is not.
-
-#### "ROSE" images are the same CHR, just with 4 empty disks
-
-The `rose.*` images are regular CHR images but with disks added by `pkl`/`Makefile` based on the "manifest", as an example of how to further extend the `pkl` framework here to support "sub" machine classes.  But the primary functional usage is to allow test storage-related features _safely_ in CHR and without a lot of manual configuration.  
-
-##### Using "ROSE" feature
-
-After installing and starting the machine, ROSE storage is disabled by default.  To add the "rose-storage" package to CHR, use following commands in terminal, which will cause a reboot:
-
-```routeros
- /system/package { update/check-for-updates duration=10s; enable rose-storage; apply-changes }        
+```sh
+unzip chr.x86_64.qemu.7.22.utm.zip
+cd chr.x86_64.qemu.7.22.utm
+./qemu.sh
 ```
 
-You will need to reboot to install ROSE package needed for storage features.  As a starting example, you can format and SMB share the extra disks in ROSE CHR using:
+`qemu.sh` auto-detects KVM, HVF, or TCG — no manual accelerator config needed.
+
+> [!TIP]
+> **Full QEMU details** — platform setup, networking (port forwarding, vmnet on macOS, bridge/tap on Linux), disk snapshots, multi-instance setups — are in the [QEMU Guide](Files/QEMU.md).
+
+## RouterOS CHR
+
+RouterOS documentation: [help.mikrotik.com](https://help.mikrotik.com/docs) · [Forum](https://forum.mikrotik.com)
+
+### CHR Licensing
+
+CHR packages ship unlicensed, running in **free** mode: all features enabled, 1 Mb/s upload cap per interface — permanently.  To activate a **trial** (up to 10 Gb/s, no feature restrictions, expires after 60 days for upgrades):
 
 ```routeros
- :foreach d in=[/disk/find] do={/disk format $d file-system=btrfs without-paging }          
- :foreach d in=[/disk/find] do={/disk set $d smb-sharing=yes smb-user=rose smb-password=rose }          
+/system/license/renew level=p10
 ```
 
-Once formatted, you then use any of the BTRFS features, including RAID 1 and RAID 10 – or, use another file system or other storage features, including snapshots.  See Mikrotik's [ROSE documentation](https://help.mikrotik.com/docs/x/HwCZEQ) for more information.
+This requires a [mikrotik.com](https://www.mikrotik.com/client) account and internet access from the VM.  See MikroTik's [CHR licensing docs](https://help.mikrotik.com/docs/spaces/ROS/pages/18350234/Cloud+Hosted+Router+CHR#CloudHostedRouter%2CCHR-Freelicenses) for all tier details.
+
+> `/ip/cloud` features (DDNS, BackToHome) require a paid perpetual license — they are not part of the free or trial tiers.
+
+### Extra Packages
+
+CHR images ship with a minimal package set.  MikroTik calls the optional ones "extra packages" — they're bundled inside the CHR image but disabled by default.  Enabling them follows the same pattern: check for updates (downloads the package index, requires internet), enable the package, and apply:
+
+```routeros
+/system/package { update/check-for-updates duration=10s; enable <package-name>; apply-changes }
+```
+
+> [!IMPORTANT]
+> The `check-for-updates` step downloads the package index from MikroTik and **requires internet access** from the VM.  With UTM Shared networking or QEMU user-mode networking (`./qemu.sh`), internet is available by default.  If you're using QEMU socket networking or an isolated bridge, you'll need to add a NATed interface first or install packages manually — see MikroTik's [package management docs](https://help.mikrotik.com/docs/spaces/ROS/pages/328129/Packages).
+
+**Common extra packages:**
+
+| Package | Enable command | Use case |
+|---|---|---|
+| `rose-storage` | `/system/package { update/check-for-updates duration=10s; enable rose-storage; apply-changes }` | BTRFS, RAID, SMB file sharing — requires ROSE variant with extra disks |
+| `container` | `/system/package { update/check-for-updates duration=10s; enable container; apply-changes }` | Run OCI containers inside RouterOS (see [tikoci/containers](https://github.com/tikoci?tab=repositories&q=container)) |
+
+After enabling `container`, you also need to enable advanced device mode:
+
+```routeros
+/system/device-mode/update mode=advanced container=yes
+```
+
+RouterOS CHR machines needs be "power cycled" for `device-mode` changes, so either stopped or terminated - not `/system/shutdown`.  See MikroTik's [container docs](https://help.mikrotik.com/docs/spaces/ROS/pages/84901929/Container) for the full walkthrough.
+
+### ROSE Variant
+
+The `rose.*` packages add 4 × 10 GB blank qcow2 disks to a standard CHR image.  After enabling `rose-storage` (see above) and rebooting, format and optionally share the disks:
+
+```routeros
+:foreach d in=[/disk/find] do={/disk format $d file-system=btrfs without-paging }
+:foreach d in=[/disk/find] do={/disk set $d smb-sharing=yes smb-user=rose smb-password=rose }
+```
+
+BTRFS supports RAID 1 and RAID 10 across those four disks — test software RAID behaviour without touching real hardware.  See MikroTik's [ROSE docs](https://help.mikrotik.com/docs/x/HwCZEQ) for the full feature set.
 
 > [!TIP]
 >
-> #### RouterOS also employs a unique "configuration language"
+> #### RouterOS employs a unique configuration language
 >
-> Mikrotik RouterOS is based on the Linux kernel.  However, "userland" is neither GNU nor BSD, but rather a proprietary system with a rich ["scripting" interface](https://help.mikrotik.com/docs/spaces/ROS/pages/47579229/Scripting).
-_i.e._ **All router configuration is always scripting** _(outside GUI/web tools, like [winbox](https://mikrotik.com/download))_.  As such, there is no `/bin/sh`, so the CLI is just a REPL for the scripting language.
+> MikroTik RouterOS is built on the Linux kernel, but "userland" is neither GNU nor BSD — it's a proprietary system with a rich [scripting interface](https://help.mikrotik.com/docs/spaces/ROS/pages/47579229/Scripting).  **All router configuration is scripting** _(outside GUI tools like [WinBox](https://mikrotik.com/download))_.  There is no `/bin/sh` — the CLI is a REPL for the scripting language.
 >
-> Also, unlike a traditional shell, RouterOS has a full ["type system"](https://help.mikrotik.com/docs/spaces/ROS/pages/47579229/Scripting#Scripting-Datatypes), including mixed-typed, multi-dimensional array, that can contain functions.  As a _router_ config language, there are first-class types like an IP address or another type, `ip-prefix`, which carries a CIDR prefix.  But there is no "float" type.  _A floating point number is not common in networking, so RouterOS does not have one.  But the side-effect is `1.1` in CLI is a `ip` type, as in early RFCs is valid shorter for `1.0.0.1` - but just one oddity that happens in type-aware shell with aggressive casting_.  Also, RouterOS does not have anything like `pkl`'s nifty [`DataSize`](https://pkl-lang.org/package-docs/pkl/0.26.0/base/DataSize.html) type, which does come up in networking.
+> Unlike a traditional shell, RouterOS has a full [type system](https://help.mikrotik.com/docs/spaces/ROS/pages/47579229/Scripting#Scripting-Datatypes): IP addresses and CIDR prefixes are first-class types, arrays can be multi-dimensional and contain functions, but there's no float — _`1.1` is an IP address (shorthand for `1.0.0.1` per early RFCs), not a decimal number._  RouterOS doesn't have anything like pkl's nifty [`DataSize`](https://pkl-lang.org/package-docs/pkl/0.26.0/base/DataSize.html) type, which does come up in networking.
 >
-> While left unexplored here, RouterOS does lend itself to using `pkl` to generate configuration as a result of these properties.  For example, a new `pkl` Renderer could be written to output a RouterOS script.  Or, a new [external resource reader](https://pkl-lang.org/main/current/language-reference/index.html#extending-resource-readers) could be used to "fetch" data from RouterOS to use in a `pkl` script.
+> While unexplored here, RouterOS lends itself to pkl-generated configuration.  A pkl [Renderer](https://pkl-lang.org/main/current/language-reference/index.html#renderers) could output RouterOS scripts, or an [external resource reader](https://pkl-lang.org/main/current/language-reference/index.html#extending-resource-readers) could fetch data from RouterOS for use in `pkl` manifests.
 
 ## Build locally
 
@@ -212,67 +187,40 @@ But adapting to new machine types beyond CHR requires a better understanding of 
 
 ## QEMU launch scripts
 
-> [!TIP]
-> **New: A full QEMU deployment guide is available in [Files/QEMU.md](Files/QEMU.md)** — covering platform setup, getting packages, networking options (port forwarding, vmnet on macOS, bridge/tap on Linux), disk image management, performance tips, and troubleshooting.
+Every `.utm` bundle includes `qemu.sh` + `qemu.cfg` for running CHR directly under QEMU — no UTM required, works on macOS and Linux.  The script auto-detects the best accelerator (KVM, HVF, or TCG) and handles UEFI firmware, networking, and serial setup automatically.
 
-CHR Releases from 7.23 onward each QEMU-backend `.utm` bundle includes a `qemu.sh` launcher and `qemu.cfg` configuration file for running the VM directly under QEMU — without UTM.  These are useful for testing, CI, troubleshooting UTM issues, and running CHR on Linux with pre-configured settings.  Currently, used to validate CHR images in GitHub Actions, but could be used for other purposes beyond UTM, like use on Linux.
-
-> `*.apple.*.utm` bundles also include `qemu.sh` and `qemu.cfg` for cross-platform testing, using UEFI firmware (OVMF for x86_64, EDK2 for aarch64).  These scripts don't replicate Apple Virtualization.framework's behavior — they provide a pure-VirtIO QEMU configuration suitable for CI and local testing.
-
-[GitHub Releases](https://github.com/tikoci/mikropkl/releases) allows downloads of `*.zip`.  On Linux (and on Mac Terminal), the _`<chr|rose>.<arch>.qemu.<ver>.utm` is a directory, with the UTM config and QEMU runner (`qemu.sh` and `qemu.cfg`) inside, with `Data` holding the CHR image.  The QEMU launch script, `qemu.sh`, works independently of UTM by using the OS's `qemu` package.  This allows Linux, or via GitHub Actions to bring up a CHR using `qemu`, instead of UTM, but both using the same `pkl` Templates for CHR.  
-
-> **If UTM imported the bundle** via `utm://downloadVM?url=…`, the bundle is stored in UTM's sandboxed directory: `~/Library/Containers/com.utmapp.UTM/Data/Documents/`, which each CHR listed by name ending in `.utm`.  The QEMU runner live under folders
-
-The `qemu.sh` script **auto-detects** the best accelerator: KVM on Linux (if `/dev/kvm` is accessible), HVF on macOS for same-architecture VMs, or TCG (software emulation) as fallback.  Override with `QEMU_ACCEL=tcg` or `QEMU_ACCEL=kvm`.
-
-### Usage
-
-In Terminal, `cd` to the downloaded UTM CHR package directory.  Within it is `qemu.sh` and `qemu.cfg` files.  The `qemu.cfg` is a representation of the `config.pkl` but rendered for QEMU, instead of the UTM `config.plist` file.  It stores things like memory and cpu counts (from original `pkl` Template settings), so those could be changed.  The `qemu.sh` handles options that are OS specific, like emulation or native (`hvf`) automatically.  Basic usage is:
-
-* `./qemu.sh` — Run in foreground (serial on stdio — interactive terminal). See [Starting RouterOS](Files/QEMU.md#starting-routeros).
-* `./qemu.sh --background` — Run in background (serial redirected to a Unix socket). See [Background mode](Files/QEMU.md#background-headless).
-* `./qemu.sh --port 9280` — Custom host port for the REST API, usable in foreground or background. See [Changing the Port](Files/QEMU.md#changing-the-port).
-* `./qemu.sh --dry-run` — Show the QEMU command without running it.
-
-#### REST API is exposed on `--port`
-
-The `--port` flag (or `QEMU_PORT` env var) sets the host port forwarded to RouterOS HTTP (port 80).  Once booted, the REST API is available at `http://admin:@localhost:<PORT>/rest/` and WebFig at `http://localhost:<PORT>/`.
-
-> [!NOTE]
-> Unlike UTM where all guest ports are accessible via the shared network, the QEMU scripts expose only a single host port (default `9180`) forwarded to the guest's HTTP port 80 — the RouterOS REST API and WebFig interface.  This is intentional: the scripts are meant for testing and automation, not as a full replacement for UTM's networking.  For full networking options — including forwarding additional ports, vmnet on macOS, and bridge/tap on Linux — see [Networking](Files/QEMU.md#networking) in QEMU.md.
-
-#### Connecting to QEMU `--background` runner
-
-When run in background mode, the CHR serial console is mapped to a Unix socket.  The launch output shows the exact `socat` command to connect, e.g. `socat - UNIX-CONNECT:/tmp/qemu-<machine-name>-serial.sock`.  A QEMU monitor socket is also available for diagnostics.  See [Accessing RouterOS](Files/QEMU.md#accessing-routeros) for full details including REST API access, SSH forwarding, and serial console examples.
-
-#### Using QEMU from `git clone`
-
-When [building locally](#build-locally) (e.g. by cloning the repo, our download "Source code" from ), `Makefile` provides helps for working with UTM.  Similar helper scripts exist for "direct" QEMU scripts (`make qemu-*`), where you can use `qemu-system-*` to launch a `pkl` created bundled by invoking `qemu.sh`.  The script uses a `qemu.cfg` with _most_ of the options from `pkl` templates including in a QEMU `--loadconfig` format used by `qemu.sh`. For example:
+Quick start:
 
 ```sh
-# Run a specific machine in the background, (use `socat` access it, or HTTP)
-make qemu-run QEMU_UTM=Machines/chr.x86_64.qemu.7.22.utm
-
-# Stop it (PID is stored in `/tmp`)
-make qemu-stop QEMU_UTM=Machines/chr.x86_64.qemu.7.22.utm
-
-# List all generated qemu.cfg files (from `Machines/**/qemu.cfg`)
-make qemu-list
+cd chr.x86_64.qemu.7.22.utm
+./qemu.sh                        # foreground — serial console on stdio
+./qemu.sh --background           # headless — serial on Unix socket
+./qemu.sh --port 8080            # custom host port for REST API / WebFig
+./qemu.sh --dry-run              # show the QEMU command without running it
 ```
 
-See [Creating New Machines](#creating-new-machines) for setup on Mac or Linux.
+The `--port` flag (default `9180`) forwards to RouterOS HTTP port 80.  REST API: `http://admin:@localhost:9180/rest/`.  WebFig: `http://localhost:9180/`.
 
-## Further UTM automation options
+> [!TIP]
+> **The full QEMU deployment guide is [Files/QEMU.md](Files/QEMU.md)** — covering platform setup, networking (port forwarding, vmnet on macOS, bridge/tap on Linux), disk snapshots, multi-instance setups, environment variables, and troubleshooting.
 
-* Basic operations can be done using the same [`utm` app URL scheme](https://docs.getutm.app/advanced/remote-control/) used to import for other operations, like starting: `utm://start?name=...`.  This is discussed in UTM's docs linked above, which show using macOS's built-in Shortcuts and Automator apps with the `utm` scheme for basic needs.
-* [Command Line `utmctl`](https://docs.getutm.app/scripting/scripting/#command-line-interface) offers more basic start and stop.  The tool is part of the UTM.app bundle, _e.g._ `/Applications/UTM.app/Contents/MacOS/utmctl`
-* [UTM's rich AppleScript support](https://docs.getutm.app/scripting/scripting/) which can be used to further automate the virtual machines, nearly all of the UI can be automated.  Additionally - for QEMU machines with SPICE installed only - UTM's AppleScript can run commands or access files directly on the _same_ guest virtual machine.  UTM docs also have a [Cheat Sheet](https://docs.getutm.app/scripting/cheat-sheet/) with a few AppleScript commands.
-  > To view UTM's AppleScript "API" (`SDEF`), you can use Script Editor app's Library feature, see Apple's doc [View an apps scripting dictionary](https://support.apple.com/guide/script-editor/view-an-apps-scripting-dictionary-scpedt1126/2.11/mac/15.0).  You will need to add UTM.app from `/Applications` in the Script Editor's Library using add item <kbd>+</kbd> button.
-* [`Makefile`](https://github.com/tikoci/mikropkl/blob/main/Makefile) also has function helpers to send AppleScript commands to UTM from within a `make <target>`, like `$(call tellutm, chr.aarch64.apple.7.18.1, stop)`.  Targets can also be extended in other ways to invoke `utmctl` or machine-specific operations.
-* UTM also support sending serial to a [/dev/stty port](https://docs.getutm.app/advanced/serial/).  This means you can use CLI tools like `screen` or `cu` to access the terminal - instead of a UI window.  Classic UNIX tools like `expect` can also be used, which allows TCL-based automation of terminals via serial too.
-  > RouterOS CHR will only use the first serial port as a login console.  By default, that is a UI Window with ANSI support.  Other added serial ports are left unassigned.  To use additional serial ports for console access (_i.e._ login and CLI commands), use `/system/console/add`.  The previous test project [tikoci/chr-utm](https://github.com/tikoci/chr-utm/blob/main/README.md) has more information on UTM Serial usage with RouterOS, including an example `expect` script for setup.
+### Using QEMU from `git clone`
 
-Each virtual machine may have its own automation APIs.  Please refer to a guest machine's own documentation for details on their APIs.  For example,  RouterOS supports many API like [REST API](https://help.mikrotik.com/docs/spaces/ROS/pages/47579162/REST+API), native TCP [API](https://help.mikrotik.com/docs/spaces/ROS/pages/47579160/API), `ssh`, and serial, among others - too many to cover here.  So guest virtual machine APIs are left to other sources.
+After [building locally](#build-locally), the Makefile provides helpers:
+
+```sh
+make qemu-run QEMU_UTM=Machines/chr.x86_64.qemu.7.22.utm   # start in background
+make qemu-stop QEMU_UTM=Machines/chr.x86_64.qemu.7.22.utm  # stop
+make qemu-list                                               # list all qemu.cfg files
+```
+
+## UTM automation
+
+UTM offers several automation paths: the [`utm://` URL scheme](https://docs.getutm.app/advanced/remote-control/) for basic lifecycle (start, stop, pause), the [`utmctl` CLI](https://docs.getutm.app/scripting/scripting/#command-line-interface) bundled inside UTM.app, [AppleScript](https://docs.getutm.app/scripting/scripting/) for rich scripting, and [Shortcuts](https://docs.getutm.app/advanced/remote-control/) integration for login-item automation.  The Makefile wraps AppleScript with helpers like `make utm-start` and `make utm-stop`.
+
+For the full walkthrough — including headless mode, pseudo-TTY serial, and auto-start at login — see [UTM Guide: Automation](Files/UTM.md#automation).
+
+RouterOS itself exposes the [REST API](https://help.mikrotik.com/docs/spaces/ROS/pages/47579162/REST+API), native TCP [API](https://help.mikrotik.com/docs/spaces/ROS/pages/47579160/API), SSH, and serial console.  See MikroTik's documentation for those.
 
 
 ## Understanding the project's structure

@@ -54,6 +54,8 @@ sudo dnf install qemu-kvm   # optional, for KVM
 
 ## Getting a CHR Package
 
+The [CHR Images](https://tikoci.github.io/chr-images.html) page is the quickest way — pick a version and architecture and it generates the download commands for your platform.  Or use the methods below directly.
+
 ### Download from GitHub Releases
 
 ```sh
@@ -415,6 +417,9 @@ sudo ./qemu.sh --bridge en0 --background --port 9180
 
 > [!TIP]
 > If you only need management access (WebFig, SSH, REST API), the default user-mode networking with `--port` is simpler and does not require `sudo`.  Use vmnet when you need the CHR to participate on a real network — for example, testing DHCP server, OSPF, or BGP.
+
+> [!NOTE]
+> **Bridging over Wi-Fi** (macOS or Linux) introduces variable latency — the vmnet/tap bridge inserts the VM behind the wireless medium, so every packet pays the full 802.11 round-trip.  This can add 5–30 ms of jitter, visible in speed tests, latency-sensitive routing protocols (OSPF hello timers, BGP hold timers), and queue testing.  Use Ethernet when you need clean baseline numbers.  _That said, Wi-Fi jitter is great material for experimenting with `fq_codel`, CAKE, or other AQM techniques — set your queue target above the typical Wi-Fi RTT and watch the latency curve smooth out._
 
 ### Bridge networking (Linux)
 
