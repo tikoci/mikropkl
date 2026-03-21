@@ -142,14 +142,76 @@ QEMU outside UTM:
   -device virtio-blk-pci,drive=drive1
   ```
 
-### RouterOS kernel driver support (confirmed via binary analysis)
+### RouterOS kernel driver support
+
+**Sources:** MikroTik GPL source (v7.2 kernel configs from `tikoci/mikrotik-gpl`),
+binary string analysis of v7.23beta2 kernel images, and runtime QEMU testing.
+The v7.2 configs are 3+ years old — MikroTik has significantly changed the arm64
+config since then (added all virtio device drivers, EFI support, etc.).
+
+**Bus/transport drivers:**
 
 | Driver | x86_64 | aarch64 | Notes |
 |---|---|---|---|
 | `virtio_pci` | ✅ | ✅ | ACPI-based discovery (QEMU default) |
-| `virtio_mmio` | ❌ unknown | ❌ | Would need `if=virtio` on `virt` — not viable |
+| `virtio_mmio` | ❌ | ❌ | Would need `if=virtio` on `virt` — not viable |
 | `pci-host-ecam-generic` | N/A | ❌ | DTB-based generic PCIe — ARM only, not present |
+| `PCI_HOST_GENERIC` | N/A | ❌ (config) | QEMU `virt` machine's PCIe host — disabled in 7.2 config |
 | `marvell,armada7040` | ❌ | ✅ | ARM target hardware — no QEMU machine type |
+
+**VirtIO device drivers:**
+
+| Driver | x86_64 (7.23 binary) | aarch64 (7.23 binary) | x86_64 (7.2 config) | aarch64 (7.2 config) | Used by mikropkl | QEMU device |
+| --- | --- | --- | --- | --- | --- | --- |
+| `virtio_blk` | ✅ | ✅ | `=y` | **not set** | ✅ disk | `virtio-blk-pci` |
+| `virtio_scsi` | ✅ | ✅ | (not listed) | **not set** | ❌ | `virtio-scsi-pci` |
+| `virtio_net` | ✅ | ✅ | **not set** | **not set** | ✅ networking | `virtio-net-pci` |
+| `virtio_console` | ✅ | ✅ | `=y` | **not set** | ❌ | `virtio-serial-pci` |
+| `virtio_balloon` | ✅ | ✅ | `=m` | **not set** | ❌ | `virtio-balloon-pci` |
+| `virtio_gpu` | ✅ | ✅ | not listed | not listed | ❌ | `virtio-gpu-pci` |
+| `virtio_rproc_serial` | ✅ | ✅ | not listed | not listed | ❌ | remoteproc virtio serial |
+| `9pnet_virtio` (v9fs) | **✅** | **❌** | `=y` | **not set** | ❌ | `virtio-9p-pci` |
+| `virtiofs` | ❌ | ❌ | not in 5.6.3 | **not set** | — | `vhost-user-fs-pci` |
+
+**Key insight — architecture divergence:** The x86_64 kernel has `CONFIG_9P_FS=y` +
+`CONFIG_NET_9P_VIRTIO=y` (confirmed in both v7.2 config and v7.23 binary — protocol
+versions 9P2000, 9P2000.L, 9P2000.u all present).  The aarch64 kernel has **none** of
+these.  This reflects different heritage: x86 CHR was designed for hypervisor use
+(Xen, Hyper-V, KVM support all present), while arm64 targeted Marvell hardware and
+only gained virtio device drivers after v7.2.
+
+**9p on x86_64 — present but not usable via RouterOS CLI:** QEMU accepts the
+`-device virtio-9p-pci` and the guest kernel binds the `9pnet_virtio` driver
+(confirmed via QEMU monitor PCI listing, device `1af4:1009`).  However, RouterOS
+does not expose Linux `mount` commands, so the 9p filesystem cannot be mounted
+through the normal RouterOS interface.  Container environments (`/container`) may
+be able to access it.  See `Lab/virtio-9p/NOTES.md`.
+
+**Other notable kernel configs (from v7.2 GPL source):**
+
+| Feature | x86_64 | aarch64 | Notes |
+|---|---|---|---|
+| `CONFIG_EFI` | `=y` (+ stub) | **not set** | arm64 gained EFI after v7.2 |
+| `CONFIG_KVM_GUEST` | `=y` | N/A | x86 CHR is KVM-aware (paravirt clock, etc.) |
+| `CONFIG_HYPERV` | `=y` | N/A | Hyper-V guest support (balloon, storage, net) |
+| `CONFIG_XEN` | `=y` | N/A | Xen PV/HVM guest support |
+| `CONFIG_PARAVIRT` | `=y` | N/A | Paravirtualization framework |
+| `CONFIG_E1000` / `E1000E` | `=m` | ❌ | Intel NIC emulation (QEMU `-device e1000`) |
+| `CONFIG_PCNET32` | `=m` | ❌ | AMD PCnet (QEMU legacy NIC) |
+| `CONFIG_8139CP` / `8139TOO` | `=m` | ❌ | Realtek RTL8139 (QEMU `-device rtl8139`) |
+| `CONFIG_TULIP` | `=m` | ❌ | DEC Tulip (QEMU `-device tulip`) |
+| `CONFIG_BLK_DEV_NVME` | `=y` | `=m` | NVMe block device |
+| `CONFIG_ATA_PIIX` | `=y` | ❌ | IDE/SATA (QEMU PIIX/ICH9) |
+| `CONFIG_VMWARE_PVSCSI` | `=y` | ❌ | VMware paravirtual SCSI |
+| `CONFIG_NFS_FS` / `NFSD` | `=m` / `=m` | `=m` / `=m` | NFS client + server |
+| `CONFIG_CIFS` | ❌ | `=m` | SMB/CIFS client (arm64 only in config) |
+| `CONFIG_FUSE_FS` | ❌ | `=m` | FUSE (arm64 only in config) |
+| `CONFIG_HW_RANDOM` | ❌ | `=y` | Hardware RNG |
+| `CONFIG_VHOST_NET` | `=m` | ❌ | vhost-net acceleration |
+| `CONFIG_SMP` | `=y` | (implied) | Multi-processor support |
+
+**Alternatives for host-guest file sharing:** SMB (`/ip smb`), FTP, HTTP
+(`/tool fetch`), REST API file upload, or SFTP.  See `Lab/virtio-9p/NOTES.md`.
 
 ### Network interface
 
@@ -197,9 +259,9 @@ Critical requirements:
   a terminal.  Use `-display none -monitor none -chardev socket... -serial chardev:...`.
 - **TCG on macOS**: Add `-accel tcg,tb-size=256` (no KVM on macOS).
 
-### Apple Virtualization.framework (Intel x86_64)
+### Apple Virtualization.framework 
 
-Uses the fat-chr image (`chr-efi.img`) with proper FAT16 EFI partition.  UTM config:
+Uses the fat-chr image (`chr-efi.img`) with proper FAT16 EFI partition on x86_64.  UTM config:
 `UEFIBoot=true`, `OperatingSystem=Linux`, NVMe disk interface, `efi_vars.fd` for
 UEFI NVRAM.  No direct QEMU flags — Apple VZ handles UEFI internally.
 
@@ -350,6 +412,93 @@ ARM MMIO efficiently.
   plus aarch64 gets additional cross-arch validation on the x86 runner.
 
 See `Lab/x86-cross-arch/NOTES.md` for the full investigation and test scripts.
+
+## RouterOS CLI Reference for QEMU Debugging
+
+RouterOS does not expose a standard Linux shell.  Use these commands for hardware
+inspection and file management when debugging QEMU device configurations.
+
+### Hardware / PCI inspection
+
+```routeros
+# List PCI devices (equivalent to lspci)
+/system/resource/hardware/print
+
+# List IRQ assignments (shows which virtio devices have drivers bound)
+/system/resource/irq/print
+
+# System info (architecture, CPU, memory, uptime)
+/system/resource/print
+```
+
+Example `/system/resource/hardware/print` output with virtio-9p-pci:
+
+```text
+# LOCATION      TYPE  CATEGORY                 VENDOR             NAME
+0 0000:00:00.0  pci   Host bridge              Intel Corporation  440FX - 82441FX PMC [Natoma]
+4 0000:00:02.0  pci   SCSI storage controller  Red Hat, Inc.      Virtio 1.0 block device
+5 0000:00:03.0  pci   Ethernet controller      Red Hat, Inc.      Virtio 1.0 network device
+6 0000:00:04.0  pci   Unclassified device      Red Hat, Inc.      Virtio 9P transport
+```
+
+### Disk and storage
+
+```routeros
+# List disks (block devices + network mounts with rose-storage)
+/disk/print
+/disk/print detail
+
+# Add network disk (rose-storage package required)
+# Valid types: nfs, smb, iscsi (no 9p type — see Lab/virtio-9p/NOTES.md)
+/disk/add type=nfs nfs-address=10.0.2.2 nfs-share=/shared
+
+# List files
+/file/print
+```
+
+### Package management
+
+```routeros
+# List installed packages
+/system/package/print
+
+# Install a package: upload .npk via SCP then reboot
+# From host: scp -P <ssh-port> package.npk admin@127.0.0.1:/
+/system/reboot
+```
+
+### Network and services
+
+```routeros
+# List IP services (SSH, HTTP, etc.) and their ports
+/ip/service/print
+
+# List interfaces
+/interface/print
+
+# DHCP client address
+/ip/address/print
+```
+
+### Accessing RouterOS from the host
+
+```sh
+# REST API (no auth on fresh install)
+curl -sf -u admin: http://127.0.0.1:9180/rest/system/resource
+
+# SSH (RouterOS CLI, not Linux shell)
+ssh -o StrictHostKeyChecking=no -p <ssh-port> admin@127.0.0.1
+
+# SCP file upload
+scp -o StrictHostKeyChecking=no -P <ssh-port> file.npk admin@127.0.0.1:/
+
+# Serial console (from --background mode)
+socat - UNIX-CONNECT:/tmp/qemu-<machine>-serial.sock
+
+# QEMU monitor (PCI info, registers, qtree)
+echo "info pci" | socat - UNIX-CONNECT:/tmp/qemu-<machine>-monitor.sock
+echo "info qtree" | socat - UNIX-CONNECT:/tmp/qemu-<machine>-monitor.sock
+```
 
 ## Common Pitfalls
 
