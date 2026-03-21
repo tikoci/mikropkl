@@ -3,7 +3,6 @@
         "ms-vscode.makefile-tools",
         "ms-python.python",
         "davidanson.vscode-markdownlint",
-        "github.vscode-pull-request-github",
         "github.vscode-github-actions"
     ]
 }

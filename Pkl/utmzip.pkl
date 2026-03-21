@@ -117,8 +117,8 @@ output {
     }
     
     when (backend == "Apple") {
-      ["\(name).utm/Data/efi_vars.fd.localcp"] { 
-        text = "efi_vars.fd" 
+      ["\(name).utm/Data/efi_vars.fd.genefi"] { 
+        text = "128" 
       }
     }
 

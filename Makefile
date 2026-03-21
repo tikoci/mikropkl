@@ -104,6 +104,65 @@ pkl:
 %: %.localcp
 	cp -f ./$(PKL_FILES_DIR)/`cat $<` $@
 
+# Generates a fresh empty UEFI NVRAM variable store for Apple Virtualization.framework.
+# Equivalent to Swift's VZEFIVariableStore(creatingVariableStoreAt:) — the API that UTM
+# calls when no store exists yet.  Previously, a stale efi_vars.fd captured from a UTM
+# CHR boot session was copied into every Apple bundle — it contained accumulated UEFI
+# variables (MTC counter, boot device paths, memory type caches) that shouldn't leak
+# across VMs.  This rule generates a pristine empty store instead.
+#
+# pkl cannot emit raw binary, so the .genefi placeholder (containing the volume size
+# in KiB, currently 128) triggers this Make rule — same pattern as .size → qcow2.
+#
+# The 96-byte header has three UEFI structures (all fields little-endian):
+#
+#   EFI_FIRMWARE_VOLUME_HEADER  (0x00–0x37, 56 bytes)
+#     [0x00] ZeroVector            16B   all zeros (reserved)
+#     [0x10] FileSystemGuid        16B   EFI_SYSTEM_NV_DATA_FV_GUID
+#                                        {fff12b8d-7696-4c8b-a985-2747075b4f50}
+#     [0x20] FvLength               8B   0x20000 (128 KiB — must match .genefi value)
+#     [0x28] Signature              4B   "_FVH" (0x4856465f)
+#     [0x2C] Attributes             4B   0x00000e36 (R/W, erase polarity=1 → 0xFF=empty)
+#     [0x30] HeaderLength           2B   0x0048 (72 bytes, includes block map below)
+#     [0x32] Checksum               2B   0xe9e6 (uint16 sum of header words = 0)
+#     [0x34] ExtHeaderOffset        2B   0x0000 (no extended header)
+#     [0x36] Reserved               1B   0x00
+#     [0x37] Revision               1B   0x02 (EFI_FVH_REVISION)
+#
+#   FV_BLOCK_MAP_ENTRY[]  (0x38–0x47, 16 bytes)
+#     [0x38] {NumBlocks=32, Length=4096}  — 32 × 4 KiB = 128 KiB
+#     [0x40] {0, 0}                       — terminator
+#
+#   VARIABLE_STORE_HEADER  (0x48–0x5f, 24 bytes)
+#     [0x48] Signature             16B   EFI_AUTHENTICATED_VARIABLE_GUID
+#                                        {ddcf3616-3275-4164-98b6-fe85707ffe7d}
+#     [0x58] Size                   4B   0x0000dfb8 (57272 — variable region capacity)
+#     [0x5C] Format                 1B   0x5a (VARIABLE_STORE_FORMATTED)
+#     [0x5D] State                  1B   0xfe (VARIABLE_STORE_HEALTHY)
+#     [0x5E] Reserved               2B   0x0000
+#
+# After the header: 0xFF fill to end of volume.  EFI uses 0xFF for erased flash
+# (erase polarity bit in Attributes) — the firmware finds free variable slots by
+# scanning for 0xFF regions.  Using 0x00 here would corrupt the store.
+%: %.genefi
+	@echo "generating empty UEFI NVRAM: $@"
+	@# EFI_FIRMWARE_VOLUME_HEADER — ZeroVector (16 bytes)
+	@printf '\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' > $@
+	@# EFI_FIRMWARE_VOLUME_HEADER — FileSystemGuid: EFI_SYSTEM_NV_DATA_FV_GUID (16 bytes)
+	@printf '\x8d\x2b\xf1\xff\x96\x76\x8b\x4c\xa9\x85\x27\x47\x07\x5b\x4f\x50' >> $@
+	@# EFI_FIRMWARE_VOLUME_HEADER — FvLength=0x20000 (8) + Signature="_FVH" (4) + Attributes (4)
+	@printf '\x00\x00\x02\x00\x00\x00\x00\x00\x5f\x46\x56\x48\x36\x0e\x00\x00' >> $@
+	@# EFI_FIRMWARE_VOLUME_HEADER — HeaderLength (2) + Checksum (2) + ExtHdrOff (2) + Reserved+Revision (2)
+	@printf '\x48\x00\xe6\xe9\x00\x00\x00\x02' >> $@
+	@# FV_BLOCK_MAP_ENTRY[]: 32 blocks × 4096 bytes (8) + terminator {0,0} (8)
+	@printf '\x20\x00\x00\x00\x00\x10\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' >> $@
+	@# VARIABLE_STORE_HEADER — Signature: EFI_AUTHENTICATED_VARIABLE_GUID (16 bytes)
+	@printf '\x16\x36\xcf\xdd\x75\x32\x64\x41\x98\xb6\xfe\x85\x70\x7f\xfe\x7d' >> $@
+	@# VARIABLE_STORE_HEADER — Size=0xdfb8 (4) + Format=0x5a (1) + State=0xfe (1) + Reserved (2)
+	@printf '\xb8\xdf\x00\x00\x5a\xfe\x00\x00' >> $@
+	@# 0xFF fill to end of volume (erase polarity — NOT 0x00)
+	@PAD=$$(($$(cat $<) * 1024 - 96)); tr '\0' '\377' < /dev/zero | head -c $$PAD >> $@
+
 # search for placeholder files
 #   note: these will only work AFTER `pkl`, and why Makefile is recursive
 URLFILES := $(wildcard ./$(PKL_OUTPUT_DIR)/*/Data/*.raw.url)
@@ -114,9 +173,11 @@ SIZEFILE := $(wildcard ./$(PKL_OUTPUT_DIR)/*/Data/*.size)
 SIZETARGETS := $(subst .size,.qcow2,$(SIZEFILE))
 LOCALCPFILE := $(wildcard ./$(PKL_OUTPUT_DIR)/*/Data/*.localcp)
 LOCALCPTARGETS := $(subst .localcp,,$(LOCALCPFILE))
+GENEFIFILE := $(wildcard ./$(PKL_OUTPUT_DIR)/*/Data/*.genefi)
+GENEFITARGETS := $(subst .genefi,,$(GENEFIFILE))
 
 # links all targets together from found placeholders
-phase2: libvirt-fixpaths qemu-chmod $(LOCALCPTARGETS) $(SIZETARGETS) $(URLTARGETS) $(ZIPIMGTARGETS)
+phase2: libvirt-fixpaths qemu-chmod $(LOCALCPTARGETS) $(GENEFITARGETS) $(SIZETARGETS) $(URLTARGETS) $(ZIPIMGTARGETS)
 	$(info ran build phase2)
 	$(info used deps: $?)
 
@@ -131,6 +192,9 @@ $(SIZETARGETS): $(SIZEFILE)
 
 # converts a .localcp file into a file copy from /Files
 $(LOCALCPTARGETS): $(LOCALCPFILE)
+
+# generates fresh UEFI NVRAM variable stores for Apple VZ
+$(GENEFITARGETS): $(GENEFIFILE)
 
 # unused currently, for debugging Makefile
 .PHONY: debug-patterns
