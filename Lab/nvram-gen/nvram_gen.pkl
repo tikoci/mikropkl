@@ -1,0 +1,85 @@
+/// Pristine UEFI NVRAM variable store generator.
+///
+/// Demonstrates generating a 128 KiB EFI firmware volume using pkl's
+/// binary output (`FileOutput.bytes` + `base64DecodedBytes`).
+///
+/// Usage:
+///   pkl eval nvram_gen.pkl -m .
+///
+/// Produces `efi_vars.fd` — a valid EFI Firmware Volume with an empty
+/// authenticated variable store, filled with 0xFF (erase polarity).
+/// Equivalent to Apple's `VZEFIVariableStore(creatingVariableStoreAt:)`.
+module nvram_gen
+
+// ---------------------------------------------------------------------------
+// Volume geometry
+// ---------------------------------------------------------------------------
+
+/// Volume size.  Changing this requires regenerating the header — the checksum,
+/// FvLength, block map, and variable store size all depend on it.
+local volumeSize: DataSize = 128.kib
+
+/// Header = FV header (56) + block map (16) + variable store header (24).
+local headerSize: Int = 96
+
+/// Fill region: 0xFF bytes after the header (erase polarity).
+local fillSize: Int = volumeSize.toUnit("b").value.toInt() - headerSize
+
+// ---------------------------------------------------------------------------
+// Header — 96 bytes, base64-encoded
+// ---------------------------------------------------------------------------
+
+/// 96-byte header containing three UEFI structures (all little-endian):
+///
+///   EFI_FIRMWARE_VOLUME_HEADER  [0x00–0x37]  56 bytes
+///     ZeroVector                [0x00]  16B  all zeros
+///     FileSystemGuid            [0x10]  16B  EFI_SYSTEM_NV_DATA_FV_GUID
+///                                            {fff12b8d-7696-4c8b-a985-2747075b4f50}
+///     FvLength                  [0x20]   8B  0x20000 (128 KiB)
+///     Signature                 [0x28]   4B  "_FVH"
+///     Attributes                [0x2C]   4B  0x00000e36
+///     HeaderLength              [0x30]   2B  0x0048 (72 bytes)
+///     Checksum                  [0x32]   2B  0xe9e6
+///     ExtHeaderOffset           [0x34]   2B  0x0000
+///     Reserved + Revision       [0x36]   2B  0x00, 0x02
+///
+///   FV_BLOCK_MAP_ENTRY[]        [0x38–0x47]  16 bytes
+///     {NumBlocks=32, Len=4096}  [0x38]   8B  32 × 4 KiB = 128 KiB
+///     Terminator {0, 0}         [0x40]   8B
+///
+///   VARIABLE_STORE_HEADER       [0x48–0x5F]  24 bytes
+///     Signature                 [0x48]  16B  EFI_AUTHENTICATED_VARIABLE_GUID
+///                                            {ddcf3616-3275-4164-98b6-fe85707ffe7d}
+///     Size                      [0x58]   4B  0x0000dfb8 (57272)
+///     Format                    [0x5C]   1B  0x5a (FORMATTED)
+///     State                     [0x5D]   1B  0xfe (HEALTHY)
+///     Reserved                  [0x5E]   2B  0x0000
+local headerBase64: String =
+  // bytes 0x00–0x2F  (48 bytes → 64 base64 chars, no padding)
+  "AAAAAAAAAAAAAAAAAAAAAI0r8f+WdotMqYUnRwdbT1AAAAIAAAAAAF9GVkg2DgAA"
+  // bytes 0x30–0x5F  (48 bytes → 64 base64 chars, no padding)
+  + "SADm6QAAAAIgAAAAABAAAAAAAAAAAAAAFjbP3XUyZEGYtv6FcH/+fbjfAABa/gAA"
+
+// ---------------------------------------------------------------------------
+// Fill — 0xFF erase-polarity bytes via base64
+// ---------------------------------------------------------------------------
+
+/// Base64 of 0xFF fill.  Three bytes of 0xFF encode to "////" in base64.
+/// The remainder (fillSize % 3) determines trailing padding characters.
+local fillBase64: String =
+  "////".repeat(fillSize ~/ 3)
+  + if (fillSize % 3 == 2) "//8="
+    else if (fillSize % 3 == 1) "/w=="
+    else ""
+
+// ---------------------------------------------------------------------------
+// Output
+// ---------------------------------------------------------------------------
+
+output {
+  files {
+    ["efi_vars.fd"] {
+      bytes = (headerBase64 + fillBase64).base64DecodedBytes
+    }
+  }
+}

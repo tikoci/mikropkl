@@ -367,6 +367,13 @@ See `Lab/x86-cross-arch/NOTES.md` for the full investigation and test scripts.
   `chr.x86_64.apple` DOES get `qemu.cfg` + `qemu.sh` (with OVMF instead of SeaBIOS)
   via a separate `when (backend == "Apple" && qemuOutput)` gate, enabling
   cross-arch CI testing on ARM64 hosts.
+- **Makefile shell commands must be POSIX sh**: GitHub Actions Ubuntu runners use
+  `dash` as `/bin/sh`, which Make invokes by default.  `dash` does **not** support
+  `\xNN` hex escapes in `printf` — it outputs the literal text `\x00` (4 ASCII chars)
+  instead of a null byte.  Always use **octal escapes** (`\NNN`) in `printf`.
+  Similarly, `tr` on macOS in UTF-8 locales encodes `\377` as the 2-byte UTF-8
+  sequence `c3 bf` instead of raw byte `0xFF` — prefix with `LC_ALL=C` for
+  byte-level operation.  See `Lab/nvram-gen/NOTES.md` for the full comparison.
 
 ## Build Commands
 
