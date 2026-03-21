@@ -146,22 +146,26 @@ pkl:
 # scanning for 0xFF regions.  Using 0x00 here would corrupt the store.
 %: %.genefi
 	@echo "generating empty UEFI NVRAM: $@"
+	@# All printf escapes use POSIX octal (\NNN) — NOT hex (\xNN).
+	@# dash (Ubuntu /bin/sh) does not support \x in printf; it outputs literal text.
 	@# EFI_FIRMWARE_VOLUME_HEADER — ZeroVector (16 bytes)
-	@printf '\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' > $@
+	@printf '\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000' > $@
 	@# EFI_FIRMWARE_VOLUME_HEADER — FileSystemGuid: EFI_SYSTEM_NV_DATA_FV_GUID (16 bytes)
-	@printf '\x8d\x2b\xf1\xff\x96\x76\x8b\x4c\xa9\x85\x27\x47\x07\x5b\x4f\x50' >> $@
+	@printf '\215\053\361\377\226\166\213\114\251\205\047\107\007\133\117\120' >> $@
 	@# EFI_FIRMWARE_VOLUME_HEADER — FvLength=0x20000 (8) + Signature="_FVH" (4) + Attributes (4)
-	@printf '\x00\x00\x02\x00\x00\x00\x00\x00\x5f\x46\x56\x48\x36\x0e\x00\x00' >> $@
+	@printf '\000\000\002\000\000\000\000\000\137\106\126\110\066\016\000\000' >> $@
 	@# EFI_FIRMWARE_VOLUME_HEADER — HeaderLength (2) + Checksum (2) + ExtHdrOff (2) + Reserved+Revision (2)
-	@printf '\x48\x00\xe6\xe9\x00\x00\x00\x02' >> $@
+	@printf '\110\000\346\351\000\000\000\002' >> $@
 	@# FV_BLOCK_MAP_ENTRY[]: 32 blocks × 4096 bytes (8) + terminator {0,0} (8)
-	@printf '\x20\x00\x00\x00\x00\x10\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' >> $@
+	@printf '\040\000\000\000\000\020\000\000\000\000\000\000\000\000\000\000' >> $@
 	@# VARIABLE_STORE_HEADER — Signature: EFI_AUTHENTICATED_VARIABLE_GUID (16 bytes)
-	@printf '\x16\x36\xcf\xdd\x75\x32\x64\x41\x98\xb6\xfe\x85\x70\x7f\xfe\x7d' >> $@
+	@printf '\026\066\317\335\165\062\144\101\230\266\376\205\160\177\376\175' >> $@
 	@# VARIABLE_STORE_HEADER — Size=0xdfb8 (4) + Format=0x5a (1) + State=0xfe (1) + Reserved (2)
-	@printf '\xb8\xdf\x00\x00\x5a\xfe\x00\x00' >> $@
+	@printf '\270\337\000\000\132\376\000\000' >> $@
 	@# 0xFF fill to end of volume (erase polarity — NOT 0x00)
-	@PAD=$$(($$(cat $<) * 1024 - 96)); tr '\0' '\377' < /dev/zero | head -c $$PAD >> $@
+	@# LC_ALL=C forces byte-level tr — without it, macOS BSD tr in UTF-8 locale
+	@# encodes \377 as U+00FF → UTF-8 c3 bf (2 bytes) instead of raw 0xFF (1 byte).
+	@PAD=$$(($$(cat $<) * 1024 - 96)); LC_ALL=C tr '\0' '\377' < /dev/zero | head -c $$PAD >> $@
 
 # search for placeholder files
 #   note: these will only work AFTER `pkl`, and why Makefile is recursive
