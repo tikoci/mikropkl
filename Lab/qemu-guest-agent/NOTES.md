@@ -2,11 +2,28 @@
 
 ## Summary
 
-RouterOS CHR 7.22 includes a **native QEMU Guest Agent** implementation that works
+RouterOS CHR includes a **native QEMU Guest Agent** implementation that works
 over the standard `org.qemu.guest_agent.0` virtio-serial channel. It is functional
 on **x86_64 only**. On aarch64, the virtio-serial device is present in QEMU but
 **RouterOS never opens the guest-side port** — the QGA service does not appear to
 run on the aarch64 build.
+
+**Tested on aarch64 with:**
+- RouterOS 7.22 (stable) — QGA not functional
+- RouterOS 7.23_ab650 (development, MikroTik test build) — QGA **still not functional**
+- Also tested `chr.provision_channel` (MikroTik-specific) — **also not functional**
+
+Both aarch64 builds show identical behavior: the virtio-serial PCI device is
+enumerated and the kernel driver binds (IRQs allocated), but no userspace QGA
+daemon opens the `org.qemu.guest_agent.0` port.  Neither does the MikroTik-specific
+`chr.provision_channel` respond.  The issue is at the packaging level — the guest
+agent/provisioning services are not included in the ARM64 routeros build.
+
+**This is MikroTik's own QGA implementation** (not stock `qemu-ga`): version
+"2.10.50" matches no QEMU release, `guest-exec` only accepts `input-data`
+(RouterOS script), `guest-file-open` uses flat RouterOS filenames, and
+`guest-get-osinfo` returns `"id": "routeros"`.  The additional
+`chr.provision_channel` is entirely MikroTik-specific.
 
 The agent reports version **2.10.50** and supports **21 commands**, which is
 significantly more than some online references suggest. Key capabilities include
@@ -16,11 +33,22 @@ shutdown.
 
 ## Test Environment
 
+### Original test (RouterOS 7.22)
+
 - **Host**: Linux x86_64 (SteamDeck, Zen 2 APU)
 - **QEMU**: 9.2.0
 - **RouterOS**: 7.22 (stable)
 - **x86_64 machine**: `chr.x86_64.qemu.7.22` — q35, KVM, SeaBIOS
 - **aarch64 machine**: `chr.aarch64.qemu.7.22` — virt, TCG (cross-arch)
+
+### Retest (RouterOS 7.23_ab650 development build)
+
+- **Host**: macOS x86_64 (Intel)
+- **QEMU**: 10.2.2
+- **RouterOS**: 7.23_ab650 (development), built 2026-03-23 10:22:36
+- **Image**: `chr-7.23_ab650-arm64.img` (128 MiB, custom build from MikroTik)
+- **aarch64 machine**: `virt`, `cortex-a710`, 1024M, 2 CPUs, TCG (cross-arch)
+- **UEFI firmware**: edk2-aarch64-code.fd + edk2-arm-vars.fd (64 MiB each)
 
 ## QEMU Setup for Guest Agent
 
@@ -238,7 +266,7 @@ These commands return `"Command not supported"` or `"command not found"`:
 | `guest-suspend-hybrid` | Would suspend VM |
 | `guest-fstrim` | Would trim filesystem |
 
-## aarch64 Results — QGA NOT Functional
+## aarch64 Results — QGA NOT Functional (RouterOS 7.22)
 
 ### Observed behavior
 
@@ -266,7 +294,7 @@ for x86 hypervisors (KVM/Proxmox/libvirt), and aarch64 CHR is a newer
 addition primarily targeting Apple VZ (which uses its own Rosetta/VZ guest
 tools, not QGA).
 
-### Implications
+### Implications (7.22)
 
 - **QGA is x86_64-only** in practice for RouterOS 7.22
 - If future aarch64 support is needed, MikroTik would need to ship the
@@ -274,40 +302,170 @@ tools, not QGA).
 - Apple VZ has its own "Rosetta" integration path which is separate from QGA
 - For aarch64 management, continue using REST API over HTTP or serial console
 
+## aarch64 Retest — MikroTik Development Build (7.23_ab650)
+
+MikroTik provided a custom ARM64 development build (`chr-7.23_ab650-arm64.img`,
+built 2026-03-23 10:22:36) for retesting QGA support.  This build was tested
+on the same host environment with QEMU 10.2.2.
+
+### Test Environment
+
+- **Host**: macOS x86_64 (Intel)
+- **QEMU**: 10.2.2
+- **RouterOS**: 7.23_ab650 (development)
+- **Machine config**: `virt`, `cortex-a710`, 1024 MiB RAM, 2 CPUs, TCG (cross-arch)
+- **UEFI firmware**: edk2-aarch64-code.fd + edk2-arm-vars.fd (both 64 MiB)
+- **Disk**: `chr-7.23_ab650-arm64.img` (128 MiB, explicit `virtio-blk-pci`)
+- **QGA channel**: `virtio-serial-pci` + `virtserialport` with `org.qemu.guest_agent.0`
+
+### Confirmed working (via REST API)
+
+RouterOS boots successfully, HTTP 200 on WebFig, REST API fully functional:
+
+```
+Version:      7.23_ab650 (development)
+Architecture: arm64
+Board:        CHR QEMU QEMU Virtual Machine
+CPU:          ARM64
+Build:        2026-03-23 10:22:36
+```
+
+### PCI device enumeration
+
+The virtio-serial-pci device **IS present** and recognized by the kernel:
+
+```
+0000:00:00.0: QEMU PCIe Host bridge (rev: 0) [Host bridge]
+0000:00:01.0: Virtio block device (rev: 0) [SCSI storage controller]
+0000:00:02.0: Virtio network device (rev: 0) [Ethernet controller]
+0000:00:03.0: Virtio console (rev: 0) [Communication controller]   ← virtio-serial
+serial0:  [serial]
+```
+
+IRQ assignments confirm the kernel bound the PCI device:
+- `virtio2-config` (IRQ 43) — virtio-serial config interrupt
+- `virtio2-virtqueues` (IRQ 44, count: 4) — virtio-serial data queues
+
+### QGA result: still NOT functional
+
+Despite the virtio-serial device being present and the PCI driver bound,
+the **guest agent daemon still does not run** on this development build.
+
+- QGA socket connected to QEMU chardev successfully
+- Sent `guest-sync-delimited` — waited 30 seconds
+- **No response** — guest never opened `org.qemu.guest_agent.0`
+- Serial console works fine (RouterOS login prompt visible)
+
+The behavior is identical to the 7.22 stable release:
+- The virtio-serial PCI device is enumerated and driver-bound
+- But no userspace process opens the virtio serial port
+- The QGA daemon binary is simply not present or not started in the ARM64 build
+
+### Conclusion
+
+The `7.23_ab650` development build did **not** add QGA support to the
+aarch64 RouterOS CHR image.  The behavior is unchanged from 7.22:
+
+| Aspect | 7.22 (stable) | 7.23_ab650 (dev) |
+|---|---|---|
+| virtio-serial-pci detected | ✅ | ✅ |
+| Kernel driver bound (IRQs) | ✅ | ✅ |
+| Guest agent port opened | ❌ | ❌ |
+| QGA commands respond | ❌ | ❌ |
+| HTTP/REST API works | ✅ | ✅ |
+| Serial console works | ✅ | ✅ |
+
+The issue remains at the userspace level — the QGA daemon needs to be
+compiled for ARM64 and included in the routeros package.  This is a
+MikroTik packaging decision, not a kernel or driver issue.
+
+## chr.provision_channel Test (aarch64 7.23_ab650)
+
+MikroTik's CHR documentation mentions a second virtio-serial channel:
+`chr.provision_channel` (in addition to the standard `org.qemu.guest_agent.0`).
+Hypothesis: maybe the ARM64 build uses the provision channel instead of the
+standard QGA channel name.
+
+### Test setup
+
+Launched QEMU with **both** channels on a single `virtio-serial-pci` device:
+- `org.qemu.guest_agent.0` → `/tmp/qga-dual-test.sock`
+- `chr.provision_channel` → `/tmp/chr-provision-test.sock`
+
+Same image, same QEMU config as the aarch64 retest above.
+
+### Result: NEITHER channel responds
+
+```
+org.qemu.guest_agent.0:  NO RESPONSE (connected, sent sync, 15s timeout)
+chr.provision_channel:   NO RESPONSE (connected, sent sync, 15s timeout)
+```
+
+Both sockets connected to the QEMU chardev (host-side virtio-serial is fine),
+but the guest never opened either port.  This confirms:
+
+1. **Not a naming issue** — ARM64 RouterOS doesn't listen on the provision
+   channel either
+2. **No virtio-serial userspace service at all** on ARM64 — neither the QGA
+   service nor the provisioning service is present in the ARM64 build
+3. The `chr.provision_channel` is likely another MikroTik-specific service
+   (possibly VMware-style provisioning adapted for KVM) that is also
+   x86_64-only in the current builds
+
+### MikroTik's own implementation
+
+The QGA in RouterOS is **MikroTik's own implementation**, not stock `qemu-ga`:
+
+- **Version "2.10.50"** — does not match any QEMU release version
+- **`guest-exec`** only works via `input-data` (RouterOS script), not `path`
+  (standard `qemu-ga` would execute a binary path)
+- **`guest-file-open`** only accepts flat filenames (RouterOS filesystem model)
+- **`guest-get-osinfo`** returns `"id": "routeros"` — stock `qemu-ga` reads
+  `/etc/os-release`
+- **`chr.provision_channel`** is entirely MikroTik-specific
+- This follows MikroTik's pattern of implementing protocols natively rather
+  than bundling third-party tools (same as their TLS implementation)
+
+This means the fix must come from MikroTik — they need to compile and enable
+their guest agent service in the ARM64 routeros build.  The kernel/driver
+infrastructure is already working on ARM64 (PCI device detected, IRQs bound).
+
 ## Command Support Matrix
 
-| Command | x86_64 | aarch64 | Notes |
-|---|---|---|---|
-| `guest-sync-delimited` | ✅ | ❌ port closed | Protocol handshake |
-| `guest-sync` | ✅ | ❌ | Alternate sync |
-| `guest-info` | ✅ | ❌ | Lists all commands |
-| `guest-ping` | ✅ | ❌ | Liveness check |
-| `guest-get-host-name` | ✅ | ❌ | Returns RouterOS identity |
-| `guest-get-osinfo` | ✅ | ❌ | OS name, version, kernel, arch |
-| `guest-get-time` | ✅ | ❌ | Epoch nanoseconds |
-| `guest-get-timezone` | ✅ | ❌ | UTC offset |
-| `guest-set-time` | ✅ (listed) | ❌ | Not tested (destructive) |
-| `guest-network-get-interfaces` | ✅ | ❌ | NIC names, MACs, IPs |
-| `guest-exec` (input-data) | ✅ | ❌ | RouterOS script execution |
-| `guest-exec` (path) | ❌ | ❌ | Not implemented |
-| `guest-exec-status` | ✅ | ❌ | Poll async exec |
-| `guest-file-open` | ✅* | ❌ | *Flat filenames only |
-| `guest-file-write` | ✅ | ❌ | base64 data |
-| `guest-file-read` | ✅ | ❌ | base64 data |
-| `guest-file-close` | ✅† | ❌ | †Empty response (timeout in strict parsing) |
-| `guest-file-flush` | ❓ | ❌ | Timeout — may not be implemented |
-| `guest-file-seek` | ❓ | ❌ | Timeout — may not be implemented |
-| `guest-fsfreeze-freeze` | ✅ | ❌ | Filesystem quiesce |
-| `guest-fsfreeze-thaw` | ✅ | ❌ | Unfreeze |
-| `guest-fsfreeze-status` | ✅ | ❌ | Freeze state |
-| `guest-shutdown` | ✅ ⚠️ | ❌ | **Destructive** — stops VM |
-| `guest-get-users` | ❌ | ❌ | Not supported |
-| `guest-get-memory-blocks` | ❌ | ❌ | Not supported |
-| `guest-get-memory-block-info` | ❌ | ❌ | Not supported |
-| `guest-get-vcpus` | ❌ | ❌ | Not supported |
-| `guest-get-fsinfo` | ❌ | ❌ | Not supported |
-| `guest-get-disks` | ❌ | ❌ | Command not found |
-| `guest-set-user-password` | ❌ (not listed) | ❌ | Not in guest-info |
+| Command | x86_64 (7.22) | aarch64 (7.22) | aarch64 (7.23_ab650) | Notes |
+|---|---|---|---|---|
+| `guest-sync-delimited` | ✅ | ❌ port closed | ❌ port closed | Protocol handshake |
+| `guest-sync` | ✅ | ❌ | ❌ | Alternate sync |
+| `guest-info` | ✅ | ❌ | ❌ | Lists all commands |
+| `guest-ping` | ✅ | ❌ | ❌ | Liveness check |
+| `guest-get-host-name` | ✅ | ❌ | ❌ | Returns RouterOS identity |
+| `guest-get-osinfo` | ✅ | ❌ | ❌ | OS name, version, kernel, arch |
+| `guest-get-time` | ✅ | ❌ | ❌ | Epoch nanoseconds |
+| `guest-get-timezone` | ✅ | ❌ | ❌ | UTC offset |
+| `guest-set-time` | ✅ (listed) | ❌ | ❌ | Not tested (destructive) |
+| `guest-network-get-interfaces` | ✅ | ❌ | ❌ | NIC names, MACs, IPs |
+| `guest-exec` (input-data) | ✅ | ❌ | ❌ | RouterOS script execution |
+| `guest-exec` (path) | ❌ | ❌ | ❌ | Not implemented |
+| `guest-exec-status` | ✅ | ❌ | ❌ | Poll async exec |
+| `guest-file-open` | ✅* | ❌ | ❌ | *Flat filenames only |
+| `guest-file-write` | ✅ | ❌ | ❌ | base64 data |
+| `guest-file-read` | ✅ | ❌ | ❌ | base64 data |
+| `guest-file-close` | ✅† | ❌ | ❌ | †Empty response (timeout in strict parsing) |
+| `guest-file-flush` | ❓ | ❌ | ❌ | Timeout — may not be implemented |
+| `guest-file-seek` | ❓ | ❌ | ❌ | Timeout — may not be implemented |
+| `guest-fsfreeze-freeze` | ✅ | ❌ | ❌ | Filesystem quiesce |
+| `guest-fsfreeze-thaw` | ✅ | ❌ | ❌ | Unfreeze |
+| `guest-fsfreeze-status` | ✅ | ❌ | ❌ | Freeze state |
+| `guest-shutdown` | ✅ ⚠️ | ❌ | ❌ | **Destructive** — stops VM |
+| `guest-get-users` | ❌ | ❌ | ❌ | Not supported |
+| `guest-get-memory-blocks` | ❌ | ❌ | ❌ | Not supported |
+| `guest-get-memory-block-info` | ❌ | ❌ | ❌ | Not supported |
+| `guest-get-vcpus` | ❌ | ❌ | ❌ | Not supported |
+| `guest-get-fsinfo` | ❌ | ❌ | ❌ | Not supported |
+| `guest-get-disks` | ❌ | ❌ | ❌ | Command not found |
+| `guest-set-user-password` | ❌ (not listed) | ❌ | ❌ | Not in guest-info |
+| `guest-suspend-*` | ❌ (not listed) | ❌ | ❌ | Not in guest-info |
+| `guest-fstrim` | ❌ (not listed) | ❌ | ❌ | Not in guest-info |
 | `guest-suspend-*` | ❌ (not listed) | ❌ | Not in guest-info |
 | `guest-fstrim` | ❌ (not listed) | ❌ | Not in guest-info |
 
@@ -447,9 +605,13 @@ sock.close()
 | Script | Purpose |
 |---|---|
 | `launch-with-qga.sh` | Wraps existing qemu.sh with QGA channel injection |
+| `launch-arm64-qga-test.sh` | Standalone aarch64 QEMU launcher with QGA (for retest) |
 | `qga-test.py` | Full QGA test suite — all commands, JSON output |
 | `qga-file-test.py` | Detailed file operations and path format testing |
+| `arm64-clean-test.py` | aarch64 QGA connection test with boot wait and timeout |
+| `test-provision-channel.py` | Tests both `org.qemu.guest_agent.0` and `chr.provision_channel` |
 | `stop-qga-test.sh` | Stop a machine launched for QGA testing |
+| `shutdown-rest.py` | Graceful RouterOS shutdown via REST API |
 
 ### Running tests
 
