@@ -4,20 +4,22 @@
 
 RouterOS CHR includes a **native QEMU Guest Agent** implementation that works
 over the standard `org.qemu.guest_agent.0` virtio-serial channel. It is functional
-on **x86_64 only**. On aarch64, the virtio-serial device is present in QEMU but
-**RouterOS never opens the guest-side port** — the QGA service does not appear to
-run on the aarch64 build.
+on **x86_64 only** (tested under both TCG and KVM). On aarch64, the virtio-serial
+device is present in QEMU but **RouterOS never opens the guest-side port** — the
+QGA service does not start on the aarch64 build under TCG cross-arch emulation.
 
 **Tested on aarch64 with:**
 - RouterOS 7.22 (stable) — QGA not functional
 - RouterOS 7.23_ab650 (development, MikroTik test build) — QGA **still not functional**
 - Also tested `chr.provision_channel` (MikroTik-specific) — **also not functional**
+- 4 virtio-serial transport variants (PCI, MMIO, modern-only, alias) — **none worked**
+- 6 machine/CPU/SMBIOS/GIC configurations — **none worked**
 
-Both aarch64 builds show identical behavior: the virtio-serial PCI device is
-enumerated and the kernel driver binds (IRQs allocated), but no userspace QGA
-daemon opens the `org.qemu.guest_agent.0` port.  Neither does the MikroTik-specific
-`chr.provision_channel` respond.  The issue is at the packaging level — the guest
-agent/provisioning services are not included in the ARM64 routeros build.
+All aarch64 tests were under TCG (cross-arch, macOS x86_64 host — no KVM available).
+The virtio-serial PCI device is enumerated and the kernel driver binds (IRQs
+allocated), but the guest-side port remains `disconnected` as reported by QEMU
+monitor.  KVM on native aarch64 hardware has not been tested and may produce
+different results — see "KVM Hypothesis" section.
 
 **This is MikroTik's own QGA implementation** (not stock `qemu-ga`): version
 "2.10.50" matches no QEMU release, `guest-exec` only accepts `input-data`
@@ -283,16 +285,15 @@ The virtio-serial PCI device is enumerated by QEMU and visible in `info qtree`.
 RouterOS aarch64 boots successfully (kernel 5.6.3, HTTP on port 80 works).
 But the guest OS never opens the `org.qemu.guest_agent.0` serial port.
 
-This suggests the **QGA agent binary/service is not present in the aarch64
-RouterOS build**, or is not configured to start on that architecture. The
-virtio_pci module is loaded (we know this from virtio-blk-pci working for
-the disk), so the PCI transport layer is functional — it's specifically the
-guest agent daemon that's absent.
+This suggests the **QGA service is not starting on the aarch64 build** under
+TCG emulation.  The virtio_pci module is loaded (we know this from virtio-blk-pci
+working for the disk), so the PCI transport layer is functional — it's the
+guest agent service that isn't opening the port.
 
-This is consistent with RouterOS CHR's history: QGA was originally developed
-for x86 hypervisors (KVM/Proxmox/libvirt), and aarch64 CHR is a newer
-addition primarily targeting Apple VZ (which uses its own Rosetta/VZ guest
-tools, not QGA).
+Note: RouterOS uses its own `nova` userland (not GNU/Linux), so the QGA
+implementation is MikroTik-proprietary.  We cannot inspect running processes
+or service managers from outside the guest.  The QEMU chardev `disconnected`
+status is the definitive observable.
 
 ### Implications (7.22)
 
@@ -359,7 +360,7 @@ the **guest agent daemon still does not run** on this development build.
 The behavior is identical to the 7.22 stable release:
 - The virtio-serial PCI device is enumerated and driver-bound
 - But no userspace process opens the virtio serial port
-- The QGA daemon binary is simply not present or not started in the ARM64 build
+- The QGA service is not starting on the ARM64 build (under TCG emulation)
 
 ### Conclusion
 
@@ -375,9 +376,9 @@ aarch64 RouterOS CHR image.  The behavior is unchanged from 7.22:
 | HTTP/REST API works | ✅ | ✅ |
 | Serial console works | ✅ | ✅ |
 
-The issue remains at the userspace level — the QGA daemon needs to be
-compiled for ARM64 and included in the routeros package.  This is a
-MikroTik packaging decision, not a kernel or driver issue.
+The issue remains at the userspace level — the QGA service is not opening
+the virtio-serial port.  All testing was under TCG cross-arch emulation;
+native aarch64 KVM has not been tested and may behave differently.
 
 ## chr.provision_channel Test (aarch64 7.23_ab650)
 
@@ -715,3 +716,213 @@ style) — same agent v2.10.50, same 21 commands, all tests pass on both.
    (set identity, add users, configure interfaces)
 6. **Monitor aarch64 support** — check if future RouterOS versions enable
    QGA on ARM64
+
+## MikroTik Feedback: `virtio-serial` vs `virtio-serial-pci` (2026-03-25)
+
+After receiving the REPORT-arm64-qga.md results, MikroTik responded:
+
+> "Please try to use `device virtio-serial` instead of `device virtio-serial-pci`."
+
+### QEMU alias resolution
+
+Checked QEMU 10.2.2 device list on the `virt` machine:
+
+```
+$ qemu-system-aarch64 -M virt -device help 2>&1 | grep virtio-serial
+name "virtio-serial-device", bus virtio-bus
+name "virtio-serial-pci", bus PCI, alias "virtio-serial"
+name "virtio-serial-pci-non-transitional", bus PCI
+name "virtio-serial-pci-transitional", bus PCI
+```
+
+**Key finding:** `virtio-serial` is an **alias for `virtio-serial-pci`** on
+the `virt` machine.  They produce the identical device — same PCI address,
+same QEMU qtree output, same kernel driver binding.
+
+### Test: all virtio-serial transport variants
+
+Tested all 4 transport variants with `chr-7.23_ab650-arm64.img` on
+macOS x86_64 (QEMU 10.2.2, TCG cross-arch):
+
+| Variant | QEMU | Boot | PCI Enumerated | IRQs Bound | QGA Responds |
+|---|---|---|---|---|---|
+| `virtio-serial` (MikroTik's suggestion) | OK | OK | Yes — "Virtio console" | Yes | **No** |
+| `virtio-serial-pci` (our original test) | OK | OK | Yes — "Virtio console" | Yes | **No** |
+| `virtio-serial-device` (MMIO transport) | OK | OK | **Not in PCI tree** | IRQ 36 (MMIO) | **No** |
+| `virtio-serial-pci-non-transitional` (modern-only) | OK | OK | Yes — "Virtio 1.0 console (rev: 1)" | Yes | **No** |
+
+All 4 variants: QEMU chardev shows `disconnected` — the guest never opened
+the virtio-serial port.  No response to `guest-sync-delimited` after 30s wait.
+
+### Detailed observations per variant
+
+**`virtio-serial` (alias):** Resolves to `virtio-serial-pci` at QEMU startup.
+QEMU qtree shows `dev: virtio-serial-pci, id "vserial0"` — identical to the
+explicit `virtio-serial-pci` test.  PCI address 0000:00:03.0, classified as
+"Virtio console [Communication controller]".  Same behavior as all previous tests.
+
+**`virtio-serial-pci` (original):** Baseline comparison.  Identical to the alias
+variant in every observable way — PCI tree, IRQs, chardev state, no response.
+
+**`virtio-serial-device` (MMIO):** Uses the virtio-bus (MMIO transport) instead
+of PCI.  The device does NOT appear in RouterOS's PCI hardware list (expected —
+it's not a PCI device).  RouterOS booted normally (disk and network are still PCI
+via `virtio-blk-pci` and `virtio-net-pci`).  The MMIO serial device was ignored
+entirely by the kernel — consistent with the known absence of `virtio_mmio` in
+the RouterOS kernel.  Also no QGA response.
+
+**`virtio-serial-pci-non-transitional` (modern-only):** Forces virtio 1.0 modern
+transport (no legacy compatibility).  PCI tree shows "Virtio 1.0 console (rev: 1)"
+instead of "Virtio console (rev: 0)".  The kernel bound the device (IRQs allocated).
+Still no QGA response.
+
+### QEMU monitor chardev state
+
+For all PCI variants, the QEMU monitor `info chardev` showed:
+
+```
+chardev: qga0: filename=disconnected:unix:/tmp/qga-variant-*.sock,server=on
+```
+
+`disconnected` means the guest has not opened the virtio-serial port.  On
+x86_64 where QGA works, this shows `filename=unix:...` (connected).
+
+### Conclusion
+
+The transport variant does not matter — the issue is at the userspace level.
+The QGA service is not starting inside the ARM64 RouterOS build under TCG,
+regardless of whether the virtio-serial device uses PCI transport, MMIO
+transport, or modern-only PCI.
+
+The kernel infrastructure works on all PCI variants (device enumerated, driver
+bound, IRQs allocated).  The MMIO variant is correctly ignored by the kernel
+(no `virtio_mmio` driver).  But no variant causes the guest agent userspace
+service to start.
+
+Test script: `test-virtio-serial-variants.py`
+Results JSON: `virtio-serial-variant-results.json`
+
+### Hypervisor / Machine / CPU Variant Testing (2026-03-25)
+
+Following the user's insight that MikroTik likely tested on real hardware with KVM,
+we tested 6 environmental configurations to rule out every variable we can control.
+The hypothesis: maybe RouterOS QGA checks for a specific hypervisor identity, machine
+type, interrupt controller, or CPU model before starting.
+
+#### Environment Limitation
+
+**Critical**: Our test host is macOS x86_64 (Intel).  QEMU only offers TCG (software
+emulation) — no KVM.  Confirmed:
+```
+$ qemu-system-aarch64 -M virt -accel help
+Accelerators supported in QEMU binary:
+tcg
+```
+
+We **cannot** test with KVM on native aarch64 hardware.  MikroTik almost certainly
+tested on a native aarch64 host (e.g., Ampere, AWS Graviton) with KVM.
+
+#### Test Matrix
+
+| Variant | QEMU Flags | Boot | QGA | board-name |
+|---|---|---|---|---|
+| SMBIOS Type 1 = KVM | `-smbios type=1,manufacturer=QEMU,product=KVM Virtual Machine` | OK | **No** | CHR QEMU KVM Virtual Machine |
+| SMBIOS Type 1 = Proxmox | `-smbios type=1,manufacturer=QEMU,product=Standard PC (Q35 + ICH9)` | OK | **No** | CHR QEMU Standard PC (Q35 + ICH9) |
+| CPU neoverse-n1 | `-cpu neoverse-n1` (ARM server CPU, common in cloud) | OK | **No** | CHR QEMU QEMU Virtual Machine |
+| Machine sbsa-ref | `-M sbsa-ref` (SBSA server reference platform) | **Timeout** | **No** | — |
+| virt + GICv3 + neoverse-n1 | `-M virt,gic-version=3 -cpu neoverse-n1` | OK | **No** | CHR QEMU KVM Virtual Machine |
+| virt + GICv3 + ITS + neoverse-n1 | `-M virt,gic-version=3,its=on -cpu neoverse-n1` | OK | **No** | CHR QEMU KVM Virtual Machine |
+
+All 5 bootable variants: QEMU started, RouterOS booted, HTTP works, QGA **no response**.
+
+`sbsa-ref` did not boot (firmware incompatibility — different ACPI tables and device
+model).  This is expected; `sbsa-ref` uses a fixed-topology board not compatible with
+the standard ARM64 CHR image.
+
+#### SMBIOS / board-name Analysis
+
+RouterOS constructs `board-name` from SMBIOS Type 1 fields:
+`"CHR " + Manufacturer + " " + Product Name`
+
+Default QEMU: `"CHR QEMU QEMU Virtual Machine"`
+With KVM SMBIOS: `"CHR QEMU KVM Virtual Machine"`
+
+Changing the SMBIOS identity DOES affect what RouterOS reports, but does NOT trigger
+QGA to start.  If RouterOS uses board-name or SMBIOS to gate QGA, it's not checking
+for "KVM" or "Proxmox" — or the check is deeper (actual KVM paravirt interface, not
+just SMBIOS strings).
+
+#### System Probe Results (REST API)
+
+Queried via REST API on `chr-7.23_ab650-arm64.img`:
+
+```
+/system/resource:
+  board-name: "CHR QEMU QEMU Virtual Machine"
+  architecture-name: "arm64"
+  cpu: "ARM"
+  cpu-count: 2
+  version: "7.23_ab650 (development)"
+
+/system/license:
+  level: "free"
+
+/system/package:
+  name: "routeros"
+  version: "7.23_ab650"
+  build-time: "2026-03-23 09:07:27"
+  size: 13867008 (13.8 MB)
+  (only ONE package — no separate chr, guest-agent, or qga package)
+
+/system/routerboard:
+  routerboard: false
+  (CHR is not routerboard hardware)
+```
+
+Key observation: there is only ONE package (`routeros`, 13.8 MB), which is
+normal for RouterOS — MikroTik bundles everything into the single routeros
+package (including the QGA implementation on x86_64).
+
+#### What We Cannot Test
+
+1. **Native aarch64 KVM**: Requires physical ARM64 hardware with `/dev/kvm`.
+   The KVM paravirt interface (PSCI via HVC, KVM hypercalls) is fundamentally
+   different from TCG.  RouterOS might check for KVM at the kernel level
+   (not just SMBIOS) to decide whether to start QGA.
+
+2. **Newer builds**: MikroTik may have fixed QGA in a build newer than `ab650`.
+   Their response says "try virtio-serial" — implying it should work — but
+   they may be testing against an internal build.
+
+3. **Different QEMU versions**: We're on QEMU 10.2.2.  MikroTik might use an
+   older version where device naming differs.  Unlikely to matter, but noted.
+
+#### Why KVM Is Likely the Gate (Theory)
+
+The same RouterOS ARM64 kernel runs on both CHR (virtual machines) and physical
+RouterBoard hardware — MikroTik ships many ARM64 devices.  QGA is only meaningful
+on CHR (running in a hypervisor), not on physical hardware.  The simplest way to
+distinguish "this is CHR" from "this is a RouterBoard" is a kernel-level KVM check.
+
+On x86_64, CHR has always been hypervisor-only (`CONFIG_KVM_GUEST=y`, Hyper-V, Xen,
+VMware paravirt all baked in).  QGA works on x86 even under TCG because the x86 CHR
+kernel has no reason to gate on KVM specifically — it's always a VM.  But on ARM64,
+where the kernel is shared with physical hardware, a `if (kvm detected) → start CHR
+services` gate makes practical sense.
+
+On ARM with KVM, the guest kernel detects KVM via:
+- PSCI (Power State Coordination Interface) method: HVC vs SMC
+- KVM-specific SMCCC hypercalls
+- ARM ID register values set by KVM
+
+With TCG, none of these are present — the kernel sees the same environment as bare
+metal.  RouterOS's init system (which is an extension of the kernel, conceptually
+similar to sysctl — not a traditional userland init) would use the kernel's own
+hypervisor detection as the source of truth, not SMBIOS strings or board-name.
+This is consistent with our SMBIOS spoofing tests producing no effect.
+
+This cannot be verified without native aarch64 KVM.
+
+Test script: `test-hypervisor-variants.py`
+Results JSON: `hypervisor-variant-results.json`
+System probe script: `probe-system-info.py`

@@ -1,0 +1,112 @@
+[
+  {
+    "name": "virtio-serial",
+    "label": "virtio-serial (MikroTik's suggestion \u2014 alias for virtio-serial-pci)",
+    "qemu_started": true,
+    "booted": true,
+    "qga_responded": false,
+    "details": "no response after 30s (guest port not opened)",
+    "pci_devices": [
+      "0000:00:00.0: QEMU PCIe Host bridge (rev: 0) [Host bridge]",
+      "0000:00:01.0: Virtio block device (rev: 0) [SCSI storage controller]",
+      "0000:00:02.0: Virtio network device (rev: 0) [Ethernet controller]",
+      "0000:00:03.0: Virtio console (rev: 0) [Communication controller]",
+      "serial0:  []"
+    ],
+    "irqs": [
+      ": IRQ 4 (count: 0)",
+      ": IRQ 41 (count: 0)",
+      ": IRQ 42 (count: 0)",
+      ": IRQ 43 (count: 0)",
+      ": IRQ 44 (count: 3)",
+      ": IRQ 45 (count: 0)",
+      ": IRQ 46 (count: 33)",
+      ": IRQ 47 (count: 6515)",
+      ": IRQ 48 (count: 0)",
+      ": IRQ 49 (count: 25)",
+      ": IRQ 50 (count: 32)"
+    ]
+  },
+  {
+    "name": "virtio-serial-pci",
+    "label": "virtio-serial-pci (original test \u2014 PCI transport)",
+    "qemu_started": true,
+    "booted": true,
+    "qga_responded": false,
+    "details": "no response after 30s (guest port not opened)",
+    "pci_devices": [
+      "0000:00:00.0: QEMU PCIe Host bridge (rev: 0) [Host bridge]",
+      "0000:00:01.0: Virtio block device (rev: 0) [SCSI storage controller]",
+      "0000:00:02.0: Virtio network device (rev: 0) [Ethernet controller]",
+      "0000:00:03.0: Virtio console (rev: 0) [Communication controller]",
+      "serial0:  []"
+    ],
+    "irqs": [
+      ": IRQ 4 (count: 0)",
+      ": IRQ 41 (count: 0)",
+      ": IRQ 42 (count: 0)",
+      ": IRQ 43 (count: 0)",
+      ": IRQ 44 (count: 3)",
+      ": IRQ 45 (count: 0)",
+      ": IRQ 46 (count: 6493)",
+      ": IRQ 47 (count: 53)",
+      ": IRQ 48 (count: 0)",
+      ": IRQ 49 (count: 22)",
+      ": IRQ 50 (count: 32)"
+    ]
+  },
+  {
+    "name": "virtio-serial-device",
+    "label": "virtio-serial-device (MMIO/platform transport)",
+    "qemu_started": true,
+    "booted": true,
+    "qga_responded": false,
+    "details": "no response after 30s (guest port not opened)",
+    "pci_devices": [
+      "0000:00:00.0: QEMU PCIe Host bridge (rev: 0) [Host bridge]",
+      "0000:00:01.0: Virtio block device (rev: 0) [SCSI storage controller]",
+      "0000:00:02.0: Virtio network device (rev: 0) [Ethernet controller]",
+      "serial0:  []"
+    ],
+    "irqs": [
+      ": IRQ 4 (count: 0)",
+      ": IRQ 36 (count: 3)",
+      ": IRQ 41 (count: 0)",
+      ": IRQ 42 (count: 0)",
+      ": IRQ 43 (count: 0)",
+      ": IRQ 44 (count: 3423)",
+      ": IRQ 45 (count: 3131)",
+      ": IRQ 46 (count: 0)",
+      ": IRQ 47 (count: 24)",
+      ": IRQ 48 (count: 39)"
+    ]
+  },
+  {
+    "name": "virtio-serial-pci-non-transitional",
+    "label": "virtio-serial-pci-non-transitional (modern-only, virtio 1.0+)",
+    "qemu_started": true,
+    "booted": true,
+    "qga_responded": false,
+    "details": "no response after 30s (guest port not opened)",
+    "pci_devices": [
+      "0000:00:00.0: QEMU PCIe Host bridge (rev: 0) [Host bridge]",
+      "0000:00:01.0: Virtio block device (rev: 0) [SCSI storage controller]",
+      "0000:00:02.0: Virtio network device (rev: 0) [Ethernet controller]",
+      "0000:00:03.0: Virtio 1.0 console (rev: 1) [Communication controller]",
+      "serial0:  []"
+    ],
+    "irqs": [
+      ": IRQ 4 (count: 0)",
+      ": IRQ 41 (count: 0)",
+      ": IRQ 42 (count: 0)",
+      ": IRQ 43 (count: 0)",
+      ": IRQ 44 (count: 3)",
+      ": IRQ 45 (count: 0)",
+      ": IRQ 46 (count: 6525)",
+      ": IRQ 47 (count: 22)",
+      ": IRQ 48 (count: 0)",
+      ": IRQ 49 (count: 23)",
+      ": IRQ 50 (count: 39)"
+    ]
+  }
+]

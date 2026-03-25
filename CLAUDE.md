@@ -99,6 +99,28 @@ Both architectures: the kernel is a Linux EFI stub (PE/COFF + bzImage/Image dual
 
 See `Lab/x86-direct-kernel/NOTES.md` for full analysis of why `-kernel` doesn't work.
 
+### RouterOS userland
+
+RouterOS does **not** use GNU/Linux userland.  The kernel is Linux 5.6.3, but
+everything above the kernel is MikroTik's proprietary `nova` system:
+
+- **No GNU coreutils, glibc, busybox, or shell** — the RouterOS CLI is its own
+  environment, not bash/sh.  There is no `/bin`, `/usr`, or standard FHS layout.
+- **Custom implementations** of common services: OpenSSL, QEMU Guest Agent,
+  SNMP, BGP, OSPF, etc. are all MikroTik-written, not stock open-source packages.
+- **Single `routeros` package** — `system/package/print` shows one monolithic
+  package.  The QGA, provisioning agent, and all services are bundled inside it.
+- **No process inspection from outside** — you cannot `ps`, `strace`, or inspect
+  running services.  The only external observables are: network ports (HTTP, SSH,
+  REST API), QEMU monitor device state (chardev connected/disconnected), and the
+  RouterOS CLI/REST API itself.
+
+**Important for agents:** Do not assume that failing to find a specific binary or
+Linux module string means a feature is missing.  MikroTik's implementations are
+proprietary and may not match expected naming or structure.  Rely on QEMU-observable
+state (chardev status, PCI device enumeration, network responses) rather than
+speculation about guest internals.
+
 ## Backend / Architecture Matrix
 
 The project produces machine variants across two backends and two architectures.  The

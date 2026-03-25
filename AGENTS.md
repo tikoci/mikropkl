@@ -449,6 +449,8 @@ curl -s -u "admin:" http://localhost:9180/rest/system/identity
 | `Lab/x86-direct-kernel/` | x86 `-kernel` boot, UEFI handover | Complete | 16-bit setup needs BIOS INT; EFI handover offset hits compressed data |
 | `Lab/x86-cross-arch/` | x86_64 on ARM64 TCG | Complete | x86 I/O port bottleneck makes cross-arch TCG not viable; abandoned after 16 iterations |
 | `Lab/libvirt/` | Libvirt XML generation | Experimental | Precursor to qemu.sh/qemu.cfg; `LIBVIRT.md` docs moved here from `Files/` |
+| `Lab/qemu-guest-agent/` | QGA on ARM64 CHR | Active | QGA works on x86_64 (v2.10.50, 21 cmds); ARM64 port stays `disconnected` under TCG; KVM untested |
+| `Lab/virtio-9p/` | VirtIO 9P filesystem sharing | Complete | x86_64 kernel has `9pnet_virtio`, driver binds, but RouterOS CLI can't mount |
 | `Lab/report-arm64-chr-check-installation-failures.md` | User-facing report | Complete | Plain-language summary of ARM64 check failure |
 
 Each `Lab/*/NOTES.md` contains reproducible test procedures and binary analysis details.

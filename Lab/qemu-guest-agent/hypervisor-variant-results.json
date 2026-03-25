@@ -1,0 +1,56 @@
+[
+  {
+    "name": "smbios-kvm",
+    "label": "SMBIOS Type 1 = KVM (what a real KVM host presents)",
+    "qemu_ok": true,
+    "booted": true,
+    "qga_ok": false,
+    "board_name": "CHR QEMU KVM Virtual Machine",
+    "details": "no response after 30s"
+  },
+  {
+    "name": "smbios-proxmox",
+    "label": "SMBIOS Type 1 = Proxmox (popular KVM management)",
+    "qemu_ok": true,
+    "booted": true,
+    "qga_ok": false,
+    "board_name": "CHR QEMU Standard PC (Q35 + ICH9)",
+    "details": "no response after 30s"
+  },
+  {
+    "name": "neoverse-n1",
+    "label": "CPU neoverse-n1 (ARM server CPU, common in cloud)",
+    "qemu_ok": true,
+    "booted": true,
+    "qga_ok": false,
+    "board_name": "CHR QEMU QEMU Virtual Machine",
+    "details": "no response after 30s"
+  },
+  {
+    "name": "sbsa-ref",
+    "label": "Machine sbsa-ref (SBSA server reference platform)",
+    "qemu_ok": true,
+    "booted": false,
+    "qga_ok": false,
+    "board_name": "",
+    "details": "boot timeout"
+  },
+  {
+    "name": "virt-gic3",
+    "label": "virt with GICv3 + neoverse-n1 (realistic server config)",
+    "qemu_ok": true,
+    "booted": true,
+    "qga_ok": false,
+    "board_name": "CHR QEMU KVM Virtual Machine",
+    "details": "no response after 30s"
+  },
+  {
+    "name": "virt-its",
+    "label": "virt with GICv3+ITS + neoverse-n1 (KVM default on real hardware)",
+    "qemu_ok": true,
+    "booted": true,
+    "qga_ok": false,
+    "board_name": "CHR QEMU KVM Virtual Machine",
+    "details": "no response after 30s"
+  }
+]
