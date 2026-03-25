@@ -95,7 +95,7 @@ I **cannot** test with KVM on native aarch64 hardware.  This may be significant 
 | `/dev/kvm` on host | Not present | Present |
 | `CONFIG_KVM_GUEST` | Kernel may detect "no KVM" | Kernel detects KVM |
 
-On x86_64, QGA works under BOTH TCG and KVM — so KVM isn't a hard requirement there.  But x86 CHR has always been a hypervisor-only product (`CONFIG_KVM_GUEST=y`, Hyper-V, Xen, VMware paravirt all present).  ARM64 is different — the **same RouterOS ARM64 kernel runs on both CHR and physical RouterBoard hardware** (MikroTik ships many ARM64 devices).  QGA makes no sense on a physical router, so the simplest gate is a kernel-level KVM check: if running under KVM, start CHR-specific services like QGA; if not, skip them.
+On x86_64, QGA works under BOTH TCG and KVM — so KVM isn't a hard requirement there.  But x86 CHR has always been a hypervisor-only product (`CONFIG_KVM_GUEST=y`, Hyper-V, Xen, VMware paravirt all present).  ARM64 is different — the same RouterOS ARM64 kernel runs on both CHR and physical RouterBoard hardware (MikroTik ships many ARM64 devices).  QGA makes no sense on a physical router, so the simplest gate is a kernel-level KVM check: if running under KVM, start CHR-specific services like QGA; if not, skip them.
 
 On ARM with KVM, the guest kernel detects the hypervisor via PSCI (HVC instead of SMC) and KVM-specific SMCCC hypercalls — these are kernel-level signals that can't be faked from QEMU's command line.  Under TCG, none of these are present, so the kernel would see the same environment as bare metal.
 
