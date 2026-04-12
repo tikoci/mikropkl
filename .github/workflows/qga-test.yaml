@@ -4,7 +4,7 @@ name: "Test: QEMU Guest Agent"
 # QGA communicates over virtio-serial channel (org.qemu.guest_agent.0).
 #
 # Known status (RouterOS 7.22, agent v2.10.50):
-#   x86_64:  QGA functional — 21 commands supported
+#   x86_64:  QGA functional on Linux/KVM runners — 21 commands supported
 #   aarch64: QGA NOT functional — guest agent does not start on ARM64
 #
 # Tests both machine styles per architecture (no cross-arch):

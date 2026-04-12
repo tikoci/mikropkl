@@ -4,9 +4,13 @@
 
 RouterOS CHR includes a **native QEMU Guest Agent** implementation that works
 over the standard `org.qemu.guest_agent.0` virtio-serial channel. It is functional
-on **x86_64 only** (tested under both TCG and KVM). On aarch64, the virtio-serial
-device is present in QEMU but **RouterOS never opens the guest-side port** — the
-QGA service does not start on the aarch64 build under TCG cross-arch emulation.
+on **x86_64** when tested on **Linux + KVM**. A later double-check on the local
+Intel Mac did **not** reproduce QGA on x86_64 under either **HVF** or **TCG**:
+the VM booted, WebFig returned HTTP 200, the virtio-serial port was present in
+QEMU, but the guest never responded on the QGA socket. On aarch64, the
+virtio-serial device is present in QEMU but **RouterOS never opens the
+guest-side port** — the QGA service does not start on the aarch64 build under
+TCG cross-arch emulation.
 
 **Tested on aarch64 with:**
 - RouterOS 7.22 (stable) — QGA not functional
@@ -51,6 +55,20 @@ shutdown.
 - **Image**: `chr-7.23_ab650-arm64.img` (128 MiB, custom build from MikroTik)
 - **aarch64 machine**: `virt`, `cortex-a710`, 1024M, 2 CPUs, TCG (cross-arch)
 - **UEFI firmware**: edk2-aarch64-code.fd + edk2-arm-vars.fd (64 MiB each)
+
+### Local x86_64 double-check (2026-04-12)
+
+- **Host**: macOS x86_64 (Intel, `Morpheus`)
+- **QEMU**: 10.2.2 (Homebrew)
+- **RouterOS**: 7.22.1
+- **Machines tested**:
+  - `chr.x86_64.qemu.7.22.1` — q35, SeaBIOS, **HVF**
+  - `chr.x86_64.qemu.7.22.1` — q35, SeaBIOS, **TCG**
+  - `chr.x86_64.apple.7.22.1` — pc, OVMF, **HVF**
+- **Result**: all three booted normally and returned HTTP 200 on WebFig, but
+  `guest-sync-delimited` timed out with `buf=b''` and the guest never produced
+  a QGA response. The injected `org.qemu.guest_agent.0` port was visible in the
+  QEMU device tree in each case.
 
 ## QEMU Setup for Guest Agent
 
@@ -905,8 +923,9 @@ on CHR (running in a hypervisor), not on physical hardware.  The simplest way to
 distinguish "this is CHR" from "this is a RouterBoard" is a kernel-level KVM check.
 
 On x86_64, CHR has always been hypervisor-only (`CONFIG_KVM_GUEST=y`, Hyper-V, Xen,
-VMware paravirt all baked in).  QGA works on x86 even under TCG because the x86 CHR
-kernel has no reason to gate on KVM specifically — it's always a VM.  But on ARM64,
+VMware paravirt all baked in).  Our original positive x86_64 result was on Linux +
+KVM, and a later local Intel Mac retest did not reproduce QGA under either HVF or
+TCG, so non-KVM x86_64 support should be treated as unconfirmed here.  But on ARM64,
 where the kernel is shared with physical hardware, a `if (kvm detected) → start CHR
 services` gate makes practical sense.
 

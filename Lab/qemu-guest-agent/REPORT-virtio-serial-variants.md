@@ -95,7 +95,13 @@ I **cannot** test with KVM on native aarch64 hardware.  This may be significant 
 | `/dev/kvm` on host | Not present | Present |
 | `CONFIG_KVM_GUEST` | Kernel may detect "no KVM" | Kernel detects KVM |
 
-On x86_64, QGA works under BOTH TCG and KVM — so KVM isn't a hard requirement there.  But x86 CHR has always been a hypervisor-only product (`CONFIG_KVM_GUEST=y`, Hyper-V, Xen, VMware paravirt all present).  ARM64 is different — the same RouterOS ARM64 kernel runs on both CHR and physical RouterBoard hardware (MikroTik ships many ARM64 devices).  QGA makes no sense on a physical router, so the simplest gate is a kernel-level KVM check: if running under KVM, start CHR-specific services like QGA; if not, skip them.
+On x86_64, our original positive result was on Linux + KVM.  A later local
+Intel Mac double-check did not reproduce x86_64 QGA under either HVF or TCG,
+so we should not treat non-KVM x86_64 support as established.  ARM64 is
+different again — the same RouterOS ARM64 kernel runs on both CHR and physical
+RouterBoard hardware (MikroTik ships many ARM64 devices).  QGA makes no sense
+on a physical router, so the simplest gate is a kernel-level KVM check: if
+running under KVM, start CHR-specific services like QGA; if not, skip them.
 
 On ARM with KVM, the guest kernel detects the hypervisor via PSCI (HVC instead of SMC) and KVM-specific SMCCC hypercalls — these are kernel-level signals that can't be faked from QEMU's command line.  Under TCG, none of these are present, so the kernel would see the same environment as bare metal.
 
@@ -138,13 +144,13 @@ qemu-system-aarch64 \
   -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0,id=qga-port0
 ```
 
-## For Reference: x86_64 QGA Works
+## For Reference: x86_64 QGA Works on Linux/KVM
 
 Same QEMU guest-agent device configuration on x86_64 CHR 7.22 produces:
 - QGA version: 2.10.50
 - 21 supported commands
 - Responds immediately on the same `org.qemu.guest_agent.0` named port
-- Works under both TCG and KVM
+- Verified on Linux x86_64 + KVM; not reproduced later on local macOS x86_64 under HVF or TCG
 
 ## Test Scripts
 
