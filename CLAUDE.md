@@ -639,8 +639,8 @@ confirmed by [actions/runner-images#13505](https://github.com/actions/runner-ima
 #### macOS HVF — CPU model (when HVF is available, e.g. bare metal)
 
 With `-accel hvf` on Apple Silicon, QEMU uses the host CPU directly via
-Hypervisor.framework.  `cortex-a710` is ARMv9.0 and requires SVE2; Apple M-series chips
-are ARMv8.5/8.6 and do not expose SVE2 through HVF.  Attempting `-cpu cortex-a710` with
+Hypervisor.framework.  `cortex-a710` is ARMv9.0 and requires SVE2, which Apple HVF does
+not expose to guests.  Attempting `-cpu cortex-a710` with
 HVF causes QEMU to crash during CPU init (before the VM even starts), which manifests as
 socat getting "Connection refused" on the serial socket (the socket file exists from
 `bind()` but QEMU never reached `listen()`).

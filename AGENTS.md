@@ -285,10 +285,10 @@ OVMF firmware paths searched (in order):
 
 ### Why `-cpu host` for HVF on macOS (not `cortex-a710`)
 
-`cortex-a710` is an ARMv9.0 CPU model.  ARMv9.0 mandates SVE2 as a core feature.
-Apple M-series chips (used in GitHub Actions `macos-15` runners) implement ARMv8.5/8.6,
-not ARMv9.  When QEMU tries to set up `cortex-a710` with `-accel hvf`, the HVF backend
-cannot satisfy the SVE2 requirement, and QEMU crashes during CPU initialization — before
+`cortex-a710` is an ARMv9.0 CPU model.  ARMv9.0 mandates SVE2 as a core feature,
+which Apple HVF does not expose to guests.  When QEMU tries to set up `cortex-a710`
+with `-accel hvf`, the HVF backend cannot satisfy the SVE2 requirement, and QEMU
+crashes during CPU initialization — before
 actually starting the VM.  The crash is subtle: QEMU creates the chardev Unix socket
 files (calls `bind()` early in init) but never reaches `listen()`, so socat clients get
 "Connection refused" rather than a proper error message.
