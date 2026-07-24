@@ -657,6 +657,14 @@ The serial socket race (socat "Connection refused") is a secondary symptom handl
 using `socat` with `retry=10,interval=1` in the workflow, so socat retries the connect
 rather than failing immediately if QEMU hasn't called `listen()` yet.
 
+#### Apple M4 — RouterOS 5.6.3 kernel incompatibility
+
+On Apple M4 hosts, aarch64 CHR reaches the kernel under HVF but immediately panics
+with `No working init found`.  TCG boots the same image normally.  `qemu.sh`
+therefore detects an `Apple M4*` CPU and automatically falls back to TCG for
+aarch64 guests.  An explicit `QEMU_ACCEL=hvf` still bypasses auto-detection so the
+combination can be retested with future QEMU/macOS fixes.
+
 #### CI conventions for `apt-get` and downloads
 
 **`apt-get` pattern** (all workflows):

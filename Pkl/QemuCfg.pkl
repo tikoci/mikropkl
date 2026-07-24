@@ -238,7 +238,13 @@ function launchScript(
         if [ "$HV_SUPPORT" = "1" ] && [ "$HOST_ARCH" = "x86_64" ] && [ "\(archBin)" = "x86_64" ]; then
           ACCEL="hvf"
         elif [ "$HV_SUPPORT" = "1" ] && [ "$HOST_ARCH" = "arm64" ] && [ "\(archBin)" = "aarch64" ]; then
-          ACCEL="hvf"
+          # RouterOS's Linux 5.6.3 kernel cannot boot with the CPU features
+          # exposed by HVF on Apple M4 hosts.  Keep QEMU_ACCEL=hvf available
+          # as an explicit override for future QEMU/macOS fixes.
+          case "$(sysctl -n machdep.cpu.brand_string 2>/dev/null || true)" in
+            "Apple M4"*) ACCEL="tcg,tb-size=256" ;;
+            *)           ACCEL="hvf" ;;
+          esac
         else
           ACCEL="tcg,tb-size=256"
         fi

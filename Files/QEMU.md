@@ -692,6 +692,7 @@ Each `router*.qcow2` is a thin clone (~200 KB initially) storing only its own ch
 | x86_64 on macOS Intel (HVF) | ~10s | Near-native via Hypervisor.framework |
 | aarch64 on ARM host (KVM) | ~10–15s | ARM servers, Raspberry Pi 5, etc. |
 | aarch64 on macOS Apple Silicon (HVF) | ~10s | M1/M2/M3 native |
+| aarch64 on Apple M4 (TCG) | ~20–60s | Automatic compatibility fallback |
 | aarch64 on x86_64 host (TCG) | ~20s | Cross-arch — fast because ARM uses MMIO |
 | x86_64 on macOS Intel (TCG) | ~30–60s | Same-arch emulation, no HVF |
 
@@ -719,6 +720,10 @@ sudo modprobe kvm-intel    # or kvm-amd
 sudo usermod -aG kvm "$USER"
 # Log out and back in
 ```
+
+On Apple M4 hosts, aarch64 CHR automatically uses TCG because RouterOS's Linux
+5.6.3 kernel panics with the CPU features exposed by HVF.  `QEMU_ACCEL=hvf`
+remains available as an explicit override for testing future QEMU/macOS fixes.
 
 ### Port conflict
 
@@ -771,4 +776,3 @@ ss -tlnp | grep 9180  # Linux
 - **DHCP server with user-mode networking:** QEMU's SLIRP backend does not pass broadcast traffic, so running a DHCP server in the CHR for external clients requires bridge or tap networking.
 - **Disk size:** The CHR image is 128 MiB.  RouterOS manages its own partition layout — there is no need to resize it for typical use.
 - **x86_64 on ARM64 hosts:** Not viable under TCG emulation (see [Architecture Notes](#architecture-notes)).
-
