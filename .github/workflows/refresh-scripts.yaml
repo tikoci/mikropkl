@@ -14,8 +14,11 @@ name: Refresh QEMU Scripts in Releases
 # Run this after a fix that only affects qemu.sh — e.g. the Apple M4 / FEAT_SSBS
 # TCG fallback (issue #11).
 
-permissions:
-  contents: write
+# Serialize runs: two overlapping dispatches could download, patch, and
+# --clobber the same asset, and the loser's upload would win with a stale bundle.
+concurrency:
+  group: refresh-scripts
+  cancel-in-progress: false
 
 on:
   workflow_dispatch:
@@ -47,6 +50,9 @@ on:
 jobs:
   plan:
     runs-on: ubuntu-latest
+    # Read-only: this job just lists releases to build the matrix.
+    permissions:
+      contents: read
     outputs:
       versions: ${{ steps.resolve.outputs.versions }}
     steps:
@@ -65,18 +71,37 @@ jobs:
             *)         LIMIT="" ;;
           esac
           if [ -n "$LIMIT" ]; then
-            # Newest releases first, tag prefix stripped back to a bare version
+            case "$LIMIT" in
+              ''|*[!0-9]*) echo "::error::latest:N needs a number, got '$LIMIT'"; exit 1 ;;
+            esac
+            # Newest releases first, tag prefix stripped back to a bare version.
+            # ltrimstr (literal) not sub (regex), so a prefix containing regex
+            # metacharacters is handled correctly; --arg keeps the input out of
+            # the filter text.
             VERSIONS=$(gh release list --limit "$LIMIT" --json tagName \
-              --jq "[.[].tagName | sub(\"^${PREFIX}\"; \"\")]")
+              | jq -c --arg prefix "$PREFIX" '[.[].tagName | ltrimstr($prefix)]')
           else
             VERSIONS=$(printf '%s\n' "$INPUT" | tr ' ' '\n' | grep -v '^$' | jq -R -s -c 'split("\n")[:-1]')
           fi
+          # Each matrix value ends up in a shell command and a URL, and the input
+          # is free-form — reject anything that is not a RouterOS version
+          # (7.22, 7.21.5, 7.23beta2, 7.24rc2) before it travels any further.
+          echo "$VERSIONS" | jq -r '.[]' | while read -r V; do
+            case "$V" in
+              *[!0-9a-z.]*|'') echo "::error::not a RouterOS version: '$V'"; exit 1 ;;
+            esac
+            echo "$V" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?((beta|rc)[0-9]+)?$' \
+              || { echo "::error::not a RouterOS version: '$V'"; exit 1; }
+          done
           echo "versions=$VERSIONS" >> "$GITHUB_OUTPUT"
           echo "Refreshing: $VERSIONS"
 
   refresh:
     runs-on: ubuntu-latest
     needs: plan
+    # Uploads refreshed release assets and edits release notes.
+    permissions:
+      contents: write
     strategy:
       matrix:
         version: ${{ fromJSON(needs.plan.outputs.versions) }}
@@ -86,9 +111,17 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
       TAG: ${{ github.event.inputs.tagprefix }}${{ matrix.version }}
+      CHR_VERSION: ${{ matrix.version }}
+      PKL_VERSION: ${{ github.event.inputs.pklversion }}
+      DRYRUN: ${{ github.event.inputs.dryrun }}
+      REPLACECFG: ${{ github.event.inputs.replacecfg }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # GITHUB_TOKEN here has contents:write and the job never pushes with
+          # git (gh reads it from GH_TOKEN), so keep it out of .git/config.
+          persist-credentials: false
 
       - name: Install packages into building machine
         run: |
@@ -99,7 +132,7 @@ jobs:
 
       - name: Install Apple pkl-lang
         run: |
-          curl -fsSL -o pkl 'https://github.com/apple/pkl/releases/download/${{ github.event.inputs.pklversion }}/pkl-linux-amd64'
+          curl -fsSL -o pkl "https://github.com/apple/pkl/releases/download/${PKL_VERSION}/pkl-linux-amd64"
           chmod +x pkl
           sudo cp ./pkl /usr/local/bin
           pkl --version
@@ -111,15 +144,13 @@ jobs:
       - name: Generate current scripts with pkl (phase 1 only — no image downloads)
         run: |
           echo "::group::pkl eval"
-          CHR_VERSION='${{ matrix.version }}' pkl eval ./Manifests/*.pkl -m /tmp/fresh
+          pkl eval ./Manifests/*.pkl -m /tmp/fresh
           echo "::endgroup::"
           ls /tmp/fresh
 
       - name: Refresh qemu.sh inside each published asset
         run: |
           set -eu
-          DRYRUN='${{ github.event.inputs.dryrun }}'
-          REPLACECFG='${{ github.event.inputs.replacecfg }}'
           CHANGED=""
           mkdir -p /tmp/work
           for ASSET in $(gh release view "$TAG" --json assets --jq '.assets[].name | select(endswith(".utm.zip"))'); do

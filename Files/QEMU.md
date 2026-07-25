@@ -768,8 +768,17 @@ panic on an M4.  Either force the accelerator yourself:
 QEMU_ACCEL=tcg ./qemu.sh
 ```
 
-or re-download the ZIP — published assets are patched in place (same URL, same VM), so a
-fresh download of the same version has the auto-detecting launcher.
+or re-download the ZIP **if that release has been refreshed** — published assets are
+patched in place (same URL, same VM identity), and a refreshed release says so in its
+notes:
+
+```text
+> QEMU launch scripts refreshed 2026-07-25 from abc1234.
+```
+
+Refreshing is a manual, per-release operation, so an older release may still carry the
+pre-fix launcher — `QEMU_ACCEL=tcg` always works regardless.  Ask in an issue if you need a
+specific version refreshed.
 
 x86_64 machines are unaffected, and on M4 hosts they run under TCG anyway
 (cross-architecture).  Reported in
