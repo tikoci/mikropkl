@@ -19,7 +19,7 @@ Install QEMU once, then every CHR package works.
 brew install qemu
 ```
 
-Homebrew provides `qemu-system-x86_64`, `qemu-system-aarch64`, and all UEFI firmware files.  On Intel Macs, QEMU uses Apple's Hypervisor.framework (HVF) for near-native speed.  On Apple Silicon, HVF accelerates aarch64 guests; x86_64 guests run under TCG emulation.
+Homebrew provides `qemu-system-x86_64`, `qemu-system-aarch64`, and all UEFI firmware files.  On Intel Macs, QEMU uses Apple's Hypervisor.framework (HVF) for near-native speed.  On Apple Silicon, HVF accelerates aarch64 guests through M3; on M4 and later, aarch64 falls back to TCG ([why](#hvf-on-apple-m4-and-later)).  x86_64 guests run under TCG emulation on any Apple Silicon Mac.
 
 ### Ubuntu / Debian
 
@@ -692,7 +692,7 @@ Each `router*.qcow2` is a thin clone (~200 KB initially) storing only its own ch
 | x86_64 on macOS Intel (HVF) | ~10s | Near-native via Hypervisor.framework |
 | aarch64 on ARM host (KVM) | ~10–15s | ARM servers, Raspberry Pi 5, etc. |
 | aarch64 on macOS Apple Silicon (HVF) | ~10s | M1/M2/M3 native |
-| aarch64 on Apple M4 (TCG) | ~20–60s | Automatic compatibility fallback |
+| aarch64 on Apple M4 and later (TCG) | ~20–60s | Automatic fallback — [HVF panics RouterOS there](#hvf-on-apple-m4-and-later) |
 | aarch64 on x86_64 host (TCG) | ~20s | Cross-arch — fast because ARM uses MMIO |
 | x86_64 on macOS Intel (TCG) | ~30–60s | Same-arch emulation, no HVF |
 
@@ -721,9 +721,59 @@ sudo usermod -aG kvm "$USER"
 # Log out and back in
 ```
 
-On Apple M4 hosts, aarch64 CHR automatically uses TCG because RouterOS's Linux
-5.6.3 kernel panics with the CPU features exposed by HVF.  `QEMU_ACCEL=hvf`
-remains available as an explicit override for testing future QEMU/macOS fixes.
+On macOS, `accel=tcg` for an aarch64 machine on Apple Silicon is expected on
+M4-and-later hosts — see [HVF on Apple M4 and later](#hvf-on-apple-m4-and-later).
+
+### HVF on Apple M4 and later
+
+On Apple M4 (and later) hosts, `qemu.sh` deliberately runs **aarch64** machines
+under TCG and prints:
+
+```text
+  Note: this Apple CPU omits FEAT_SSBS (M4 and later).  RouterOS's kernel
+        panics under -accel hvf there, so TCG is used instead — slower, but it boots.
+```
+
+Under HVF the guest runs on the physical CPU, so it sees the real CPU ID
+registers — the `-cpu` model has no effect on which features are advertised.
+Apple's M4 dropped `FEAT_SSBS` (an ARMv8.5 speculative-store-bypass control) that
+RouterOS's Linux 5.6.3 kernel expects, so the guest kernel panics moments after
+the EFI stub hands over:
+
+```text
+Kernel panic - not syncing: No working init found.
+```
+
+Detection is by CPU feature, not by chip name:
+
+```sh
+sysctl -n hw.optional.arm.FEAT_SSBS     # 0 on M4+, 1 on M1/M2/M3
+```
+
+Nothing on the host side works around it today: `-cpu max` panics identically,
+`-cpu host,ssbs=on` is rejected (`Property 'host-arm-cpu.ssbs' not found`), and no
+released QEMU injects the bit under HVF.  TCG's fixed `cortex-a710` model does
+advertise `FEAT_SSBS`, which is why emulation boots.
+
+To retest once QEMU or RouterOS changes, force it explicitly:
+
+```sh
+QEMU_ACCEL=hvf ./qemu.sh
+```
+
+**Downloaded a package before this fix?**  Its `qemu.sh` still auto-selects HVF and will
+panic on an M4.  Either force the accelerator yourself:
+
+```sh
+QEMU_ACCEL=tcg ./qemu.sh
+```
+
+or re-download the ZIP — published assets are patched in place (same URL, same VM), so a
+fresh download of the same version has the auto-detecting launcher.
+
+x86_64 machines are unaffected, and on M4 hosts they run under TCG anyway
+(cross-architecture).  Reported in
+[tikoci/mikropkl#11](https://github.com/tikoci/mikropkl/issues/11).
 
 ### Port conflict
 

@@ -1,0 +1,196 @@
+name: Refresh QEMU Scripts in Releases
+
+# Replaces the generated qemu.sh (and optionally qemu.cfg) inside already-published
+# *.utm.zip release assets, without rebuilding the bundle.
+#
+# Why not just re-run chr.yaml for the same version?  A rebuild regenerates
+# config.plist, and `Randomish.hashUUID` mints a NEW UTM VM Identifier (it reads
+# random.org), so the refreshed bundle would import into UTM as a *different*
+# machine.  This workflow therefore downloads each published asset, swaps only the
+# script files, and re-uploads with the same asset name — the download URL and the
+# `utm://downloadVM?url=...` links keep working, and config.plist/disk bytes are
+# untouched.
+#
+# Run this after a fix that only affects qemu.sh — e.g. the Apple M4 / FEAT_SSBS
+# TCG fallback (issue #11).
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: 'Released versions to refresh: space-separated (e.g. "7.23.2 7.24rc2"), or "latest", or "latest:N"'
+        default: "latest"
+        type: string
+        required: true
+      tagprefix:
+        description: 'Prefix used in git tag / release'
+        default: "chr-"
+        type: string
+        required: true
+      pklversion:
+        description: 'pkl Version used to regenerate the scripts'
+        default: "0.30.2"
+        type: string
+        required: true
+      dryrun:
+        description: 'Diff only — do not upload the refreshed assets'
+        default: true
+        type: boolean
+      replacecfg:
+        description: 'Also replace qemu.cfg when it differs (default: report only)'
+        default: false
+        type: boolean
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.resolve.outputs.versions }}
+    steps:
+      - name: Resolve version list to a matrix
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          INPUT: ${{ github.event.inputs.versions }}
+          PREFIX: ${{ github.event.inputs.tagprefix }}
+        run: |
+          set -eu
+          case "$INPUT" in
+            latest)    LIMIT=1 ;;
+            latest:*)  LIMIT="${INPUT#latest:}" ;;
+            *)         LIMIT="" ;;
+          esac
+          if [ -n "$LIMIT" ]; then
+            # Newest releases first, tag prefix stripped back to a bare version
+            VERSIONS=$(gh release list --limit "$LIMIT" --json tagName \
+              --jq "[.[].tagName | sub(\"^${PREFIX}\"; \"\")]")
+          else
+            VERSIONS=$(printf '%s\n' "$INPUT" | tr ' ' '\n' | grep -v '^$' | jq -R -s -c 'split("\n")[:-1]')
+          fi
+          echo "versions=$VERSIONS" >> "$GITHUB_OUTPUT"
+          echo "Refreshing: $VERSIONS"
+
+  refresh:
+    runs-on: ubuntu-latest
+    needs: plan
+    strategy:
+      matrix:
+        version: ${{ fromJSON(needs.plan.outputs.versions) }}
+      fail-fast: false
+      max-parallel: 1
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.event.inputs.tagprefix }}${{ matrix.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install packages into building machine
+        run: |
+          echo "::group::apt-get install"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends zip unzip
+          echo "::endgroup::"
+
+      - name: Install Apple pkl-lang
+        run: |
+          curl -fsSL -o pkl 'https://github.com/apple/pkl/releases/download/${{ github.event.inputs.pklversion }}/pkl-linux-amd64'
+          chmod +x pkl
+          sudo cp ./pkl /usr/local/bin
+          pkl --version
+
+      - name: Verify the release exists
+        run: |
+          gh release view "$TAG" --json tagName,isDraft --jq '"release \(.tagName) (draft=\(.isDraft))"'
+
+      - name: Generate current scripts with pkl (phase 1 only — no image downloads)
+        run: |
+          echo "::group::pkl eval"
+          CHR_VERSION='${{ matrix.version }}' pkl eval ./Manifests/*.pkl -m /tmp/fresh
+          echo "::endgroup::"
+          ls /tmp/fresh
+
+      - name: Refresh qemu.sh inside each published asset
+        run: |
+          set -eu
+          DRYRUN='${{ github.event.inputs.dryrun }}'
+          REPLACECFG='${{ github.event.inputs.replacecfg }}'
+          CHANGED=""
+          mkdir -p /tmp/work
+          for ASSET in $(gh release view "$TAG" --json assets --jq '.assets[].name | select(endswith(".utm.zip"))'); do
+            MACHINE="${ASSET%.zip}"
+            echo "::group::$ASSET"
+            if [ ! -f "/tmp/fresh/$MACHINE/qemu.sh" ]; then
+              echo "SKIP: pkl produced no $MACHINE — manifest set changed since this release"
+              echo "::endgroup::"
+              continue
+            fi
+            rm -rf "/tmp/work/$MACHINE" "/tmp/$ASSET"
+            gh release download "$TAG" --pattern "$ASSET" --dir /tmp
+            unzip -q "/tmp/$ASSET" -d /tmp/work
+            OLD="/tmp/work/$MACHINE/qemu.sh"
+            NEW="/tmp/fresh/$MACHINE/qemu.sh"
+            if cmp -s "$OLD" "$NEW"; then
+              echo "already current: qemu.sh unchanged"
+              echo "::endgroup::"
+              continue
+            fi
+            diff -u "$OLD" "$NEW" || true
+            cp "$NEW" "$OLD"
+            chmod a+x "$OLD"
+            # qemu.cfg is expected to be stable (its MAC is derived deterministically
+            # from the machine name) — report drift rather than silently changing the
+            # machine definition, since config.plist is intentionally left untouched.
+            if ! cmp -s "/tmp/work/$MACHINE/qemu.cfg" "/tmp/fresh/$MACHINE/qemu.cfg"; then
+              diff -u "/tmp/work/$MACHINE/qemu.cfg" "/tmp/fresh/$MACHINE/qemu.cfg" || true
+              if [ "$REPLACECFG" = "true" ]; then
+                echo "NOTE: replacing qemu.cfg (replacecfg=true)"
+                cp "/tmp/fresh/$MACHINE/qemu.cfg" "/tmp/work/$MACHINE/qemu.cfg"
+              else
+                echo "WARNING: qemu.cfg differs from the published asset — left as published."
+                echo "         Re-run with replacecfg=true if the new definition is intended."
+              fi
+            fi
+            rm -f "/tmp/$ASSET"
+            ( cd /tmp/work && zip -q -r "/tmp/$ASSET" "$MACHINE" )
+            if [ "$DRYRUN" = "true" ]; then
+              echo "dry run: would upload $ASSET ($(du -h "/tmp/$ASSET" | cut -f1))"
+            else
+              gh release upload "$TAG" "/tmp/$ASSET" --clobber
+              echo "uploaded $ASSET"
+            fi
+            CHANGED="$CHANGED $MACHINE"
+            echo "::endgroup::"
+          done
+          {
+            echo "### $TAG"
+            if [ -z "$CHANGED" ]; then
+              echo "No asset needed a new \`qemu.sh\`."
+            else
+              echo "Refreshed \`qemu.sh\` in:"
+              for M in $CHANGED; do echo "- \`$M.zip\`"; done
+              if [ "$DRYRUN" = "true" ]; then
+                echo ""
+                echo "_(dry run — nothing uploaded)_"
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "REFRESHED=$CHANGED" >> "$GITHUB_ENV"
+
+      - name: Record the refresh in the release notes
+        if: ${{ github.event.inputs.dryrun != 'true' }}
+        run: |
+          set -eu
+          [ -n "${REFRESHED:-}" ] || { echo "nothing refreshed — release notes untouched"; exit 0; }
+          gh release view "$TAG" --json body --jq .body > /tmp/body.md
+          {
+            echo ""
+            echo "> **QEMU launch scripts refreshed** $(date -u +%Y-%m-%d) from \`${GITHUB_SHA:0:7}\`."
+            echo "> Only \`qemu.sh\` was replaced — the VM definition and disk image are unchanged."
+          } >> /tmp/body.md
+          gh release edit "$TAG" --notes-file /tmp/body.md

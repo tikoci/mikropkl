@@ -149,8 +149,15 @@ jobs:
           echo "KVM_AVAIL=0" >> $GITHUB_ENV
           HV_SUPPORT=$(sysctl -n kern.hv_support 2>/dev/null || echo 0)
           echo "HV_SUPPORT=$HV_SUPPORT" >> $GITHUB_ENV
+          # Apple M4+ dropped FEAT_SSBS; qemu.sh downgrades aarch64 to TCG there
+          # because RouterOS's kernel panics under HVF (issue #11).
+          HOST_SSBS=$(sysctl -n hw.optional.arm.FEAT_SSBS 2>/dev/null || echo 1)
+          echo "HOST_SSBS=$HOST_SSBS" >> $GITHUB_ENV
           if [ "$HV_SUPPORT" = "1" ]; then
             echo "Using Hypervisor.framework (HVF) for native-arch guests, TCG for cross-arch"
+            if [ "$HOST_SSBS" = "0" ]; then
+              echo "::notice::host lacks FEAT_SSBS (Apple M4+) — aarch64 machines will use TCG"
+            fi
           else
             echo "::notice::HVF not available (kern.hv_support=$HV_SUPPORT) — all machines will use TCG"
           fi
@@ -290,6 +297,12 @@ jobs:
             # HVF on macOS native-arch (if kern.hv_support=1), KVM on Linux native-arch, TCG for cross-arch
             if [ "$VM_ARCH" = "$HOST_ARCH_NORM" ] && [ "$OS_TYPE" = "Darwin" ] && [ "${HV_SUPPORT:-0}" = "1" ]; then
               EXPECTED_ACCEL="hvf"
+              # ...except aarch64 on FEAT_SSBS-less Apple silicon (M4+), where
+              # qemu.sh deliberately picks TCG (issue #11) — mirror that here so
+              # the accel assertion and the boot timeout stay correct.
+              if [ "$VM_ARCH" = "aarch64" ] && [ "${HOST_SSBS:-1}" = "0" ]; then
+                EXPECTED_ACCEL="tcg"
+              fi
             elif [ "$VM_ARCH" = "$HOST_ARCH_NORM" ] && [ "$KVM_AVAIL" = "1" ]; then
               EXPECTED_ACCEL="kvm"
             else

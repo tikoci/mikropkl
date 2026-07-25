@@ -285,13 +285,17 @@ OVMF firmware paths searched (in order):
 
 ### Why `-cpu host` for HVF on macOS (not `cortex-a710`)
 
-`cortex-a710` is an ARMv9.0 CPU model.  ARMv9.0 mandates SVE2 as a core feature,
-which Apple HVF does not expose to guests.  When QEMU tries to set up `cortex-a710`
-with `-accel hvf`, the HVF backend cannot satisfy the SVE2 requirement, and QEMU
-crashes during CPU initialization — before
+HVF runs the guest on the host CPU via Hypervisor.framework, so a fixed CPU model such
+as `cortex-a710` cannot be instantiated — QEMU crashes during CPU initialization, before
 actually starting the VM.  The crash is subtle: QEMU creates the chardev Unix socket
 files (calls `bind()` early in init) but never reaches `listen()`, so socat clients get
 "Connection refused" rather than a proper error message.
+
+`-cpu host` only fixes *starting* QEMU.  For feature advertisement the model is inert
+under HVF — the guest reads the physical CPU ID registers either way, confirmed on an
+Apple M4 where `-cpu max` behaved identically ([#11](https://github.com/tikoci/mikropkl/issues/11)).
+A host feature gap therefore cannot be papered over with `-cpu`; see
+[FEAT_SSBS](#feat_ssbs-less-apple-hosts-m4-fall-back-to-tcg) below.
 
 The same fix applies to x86_64 HVF on macOS Intel (`chr.x86_64.apple`).  Without
 `-cpu host`, QEMU uses a default CPU model (e.g. `qemu64`) that requests AMD-specific
@@ -325,6 +329,32 @@ target; `-cpu host` is only needed when QEMU maps guest CPUID directly to hardwa
 
 **Secondary fix**: the workflow's socat serial capture now uses `retry=10,interval=1`
 so it handles the race window between QEMU calling `bind()` and `listen()`.
+
+### FEAT_SSBS-less Apple hosts (M4+) fall back to TCG
+
+Apple's M4 removed `FEAT_SSBS` (ARMv8.5 speculative-store-bypass control).  Under HVF the
+guest sees the physical CPU ID registers, so the missing feature reaches RouterOS's Linux
+5.6.3 kernel — which assumes it is present and panics right after the EFI stub hands over
+(`Kernel panic - not syncing: No working init found`, t≈0.076s).  TCG boots the same image
+because its fixed `cortex-a710` model advertises SSBS.
+
+`qemu.sh` therefore probes the feature before selecting HVF for an aarch64 guest:
+
+```sh
+if [ "$(sysctl -n hw.optional.arm.FEAT_SSBS 2>/dev/null || echo 1)" = "0" ]; then
+  ACCEL="tcg,tb-size=256"; SSBS_TCG=1     # SSBS_TCG drives the banner note
+else
+  ACCEL="hvf"
+fi
+```
+
+Keyed on the feature rather than `machdep.cpu.brand_string` so it covers M5+ and any other
+SSBS-less chip; an absent/unreadable key means "has SSBS".  `QEMU_ACCEL=hvf` overrides.
+Grounded in [#11](https://github.com/tikoci/mikropkl/issues/11): `FEAT_SSBS=0` on the
+reporter's M4, `-cpu max` panics identically, `-cpu host,ssbs=on` errors with `Property
+'host-arm-cpu.ssbs' not found`.  No released QEMU injects SSBS under HVF (upstream shim is
+an unmerged RFC), so restoring HVF later needs a QEMU-version floor at this same site.
+`quickchr` uses the identical probe ([quickchr#98](https://github.com/tikoci/quickchr/pull/98)).
 
 ### Why `sysctl kern.hv_support` check before selecting HVF
 
