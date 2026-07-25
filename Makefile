@@ -19,6 +19,7 @@ CACHE_DIR := .url-cache
 
 # machine specific properties
 CHR_VERSION ?= stable
+CHR_VERSION_TEST ?= 7.22.1
 
 # options for `pkl` build
 # PKL_OPTIONS := -e chrVersion=$(CHR_VERSION)
@@ -45,7 +46,7 @@ distclean: clean
 # Tests/accel-detect.sh generates launchers into a temp dir and checks the
 # accelerator decision table with stubbed host probes (see Tests/README.md).
 test:
-	sh ./Tests/accel-detect.sh $(CHR_VERSION_TEST)
+	sh ./Tests/accel-detect.sh "$(CHR_VERSION_TEST)"
 
 # pkl creates the initial files /Manifasts to kickstart a UTM ZIP
 phase1: pkl

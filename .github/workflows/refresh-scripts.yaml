@@ -165,6 +165,7 @@ jobs:
           set -eu
           CHANGED=""
           CFG_CHANGED=""
+          VERIFIED=""
           mkdir -p /tmp/work
           for ASSET in $(gh release view "$TAG" --json assets --jq '.assets[].name | select(endswith(".utm.zip"))'); do
             MACHINE="${ASSET%.zip}"
@@ -191,6 +192,9 @@ jobs:
               chmod a+x "/tmp/work/$MACHINE/qemu.sh"
             else
               echo "qemu.sh already current"
+              # This also makes a re-run repair release-note provenance when a
+              # previous run uploaded successfully but its note step failed.
+              VERIFIED="$VERIFIED $MACHINE"
             fi
 
             # qemu.cfg is expected to be stable (its MAC is derived deterministically
@@ -222,6 +226,7 @@ jobs:
             else
               gh release upload "$TAG" "/tmp/$ASSET" --clobber
               echo "uploaded $ASSET"
+              [ "$SH_STALE" = "1" ] && VERIFIED="$VERIFIED $MACHINE" || true
             fi
             CHANGED="$CHANGED $MACHINE"
             [ "$REPLACED_CFG" = "1" ] && CFG_CHANGED="$CFG_CHANGED $MACHINE" || true
@@ -246,14 +251,17 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
           # Trim the leading separator so the value is exactly the machine list.
-          echo "REFRESHED=${CHANGED# }" >> "$GITHUB_ENV"
-          echo "REFRESHED_CFG=${CFG_CHANGED# }" >> "$GITHUB_ENV"
+          {
+            echo "REFRESHED=${CHANGED# }"
+            echo "REFRESHED_CFG=${CFG_CHANGED# }"
+            echo "VERIFIED=${VERIFIED# }"
+          } >> "$GITHUB_ENV"
 
       - name: Record the refresh in the release notes
         if: ${{ github.event.inputs.dryrun != 'true' }}
         run: |
           set -eu
-          [ -n "${REFRESHED:-}" ] || { echo "nothing refreshed — release notes untouched"; exit 0; }
+          [ -n "${VERIFIED:-}" ] || { echo "no current assets verified — release notes untouched"; exit 0; }
           SHORT_SHA="${GITHUB_SHA:0:7}"
           gh release view "$TAG" --json body --jq .body > /tmp/body.md
           # Idempotent: a re-run from the same commit must not stack notes.
@@ -261,11 +269,14 @@ jobs:
             echo "release notes already record a refresh from $SHORT_SHA — leaving them alone"
             exit 0
           fi
+          # Describe the verified postcondition, not only work done in this
+          # attempt. That remains truthful when this is a recovery run after
+          # assets were uploaded but the previous release-note update failed.
           # shellcheck disable=SC2016  # backticks are markdown, not substitution
-          if [ -n "${REFRESHED_CFG:-}" ]; then
-            WHAT='`qemu.sh` and `qemu.cfg` were replaced'
+          if [ "$REPLACECFG" = "true" ]; then
+            WHAT='`qemu.sh` and `qemu.cfg` now match this commit'
           else
-            WHAT='Only `qemu.sh` was replaced'
+            WHAT='`qemu.sh` now matches this commit; `qemu.cfg` was left as published'
           fi
           {
             echo ""
