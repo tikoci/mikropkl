@@ -11,7 +11,7 @@ name: Refresh QEMU Scripts in Releases
 # `utm://downloadVM?url=...` links keep working, and config.plist/disk bytes are
 # untouched.
 #
-# Run this after a fix that only affects qemu.sh — e.g. the Apple M4 / FEAT_SSBS
+# Run this after a fix that only affects qemu.sh — e.g. the Apple Silicon aarch64
 # TCG fallback (issue #11).
 
 # Serialize runs: two overlapping dispatches could download, patch, and

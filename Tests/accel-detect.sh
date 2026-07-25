@@ -3,7 +3,7 @@
 #
 # Verifies what the generated launcher *currently* decides, so the decision table
 # cannot regress silently.  The interesting case cannot be reproduced on any CI
-# runner or on an Intel Mac — HVF + FEAT_SSBS=0 needs Apple M4 hardware — so the
+# runner or on an Intel Mac — it needs an Apple Silicon host with HVF — so the
 # host probes (`uname`, `sysctl`) are stubbed on PATH and the script is run with
 # --dry-run, which prints the assembled QEMU command without launching anything.
 #
@@ -55,8 +55,7 @@ cat > "$WORK/stub/sysctl" <<'EOF'
 #!/bin/sh
 for key; do :; done   # key = last argument
 case "$key" in
-  kern.hv_support)           echo "${STUB_HV:-1}" ;;
-  hw.optional.arm.FEAT_SSBS) [ "${STUB_SSBS:-1}" = "absent" ] && exit 1; echo "${STUB_SSBS:-1}" ;;
+  kern.hv_support) echo "${STUB_HV:-1}" ;;
   *) exit 1 ;;
 esac
 EOF
@@ -91,9 +90,9 @@ check() {
     *)      grep -q -- "-cpu $WANT_CPU" "$WORK/out" || PROBLEM="$PROBLEM cpu(want=$WANT_CPU)" ;;
   esac
   if [ "$WANT_NOTE" = "note" ]; then
-    grep -q "FEAT_SSBS" "$WORK/err" || PROBLEM="$PROBLEM missing-ssbs-note"
+    grep -q "AArch32" "$WORK/err" || PROBLEM="$PROBLEM missing-aarch32-note"
   else
-    grep -q "FEAT_SSBS" "$WORK/err" && PROBLEM="$PROBLEM unexpected-ssbs-note"
+    grep -q "AArch32" "$WORK/err" && PROBLEM="$PROBLEM unexpected-aarch32-note"
   fi
 
   if [ -n "$PROBLEM" ]; then
@@ -107,31 +106,28 @@ check() {
 }
 
 echo "== aarch64 guest =="
-# The regression this test exists for: HVF is available, but the host omits
-# FEAT_SSBS (Apple M4+), so the launcher must pick TCG and say why (issue #11).
-check "M4 (hv=1, FEAT_SSBS=0) → TCG + note" \
+# The regression this test exists for: HVF is available on an Apple Silicon host,
+# but arm64 CHR's /init is a 32-bit ARM binary and Apple Silicon implements no
+# AArch32, so the launcher must pick TCG and say why (issue #11).  This holds on
+# *every* Apple Silicon generation — an earlier fix scoped it to M4+ via
+# FEAT_SSBS, which left M1/M2/M3 selecting an accelerator that cannot boot.
+check "Apple Silicon (hv=1) → TCG + note" \
   "$ARM_VM" "tcg,tb-size=256" "cortex-a710" note \
-  STUB_OS=Darwin STUB_ARCH=arm64 STUB_HV=1 STUB_SSBS=0
-check "M1/M2/M3 (hv=1, FEAT_SSBS=1) → HVF + -cpu host" \
+  STUB_OS=Darwin STUB_ARCH=arm64 STUB_HV=1
+check "QEMU_ACCEL=hvf overrides the fallback" \
   "$ARM_VM" "hvf" "host" no-note \
-  STUB_OS=Darwin STUB_ARCH=arm64 STUB_HV=1 STUB_SSBS=1
-check "older macOS (sysctl key absent) → HVF" \
-  "$ARM_VM" "hvf" "host" no-note \
-  STUB_OS=Darwin STUB_ARCH=arm64 STUB_HV=1 STUB_SSBS=absent
-check "QEMU_ACCEL=hvf overrides the fallback on an M4" \
-  "$ARM_VM" "hvf" "host" no-note \
-  STUB_OS=Darwin STUB_ARCH=arm64 STUB_HV=1 STUB_SSBS=0 QEMU_ACCEL=hvf
-check "no HVF (GitHub macOS runner) → TCG, no SSBS note" \
+  STUB_OS=Darwin STUB_ARCH=arm64 STUB_HV=1 QEMU_ACCEL=hvf
+check "no HVF (GitHub macOS runner) → TCG, no AArch32 note" \
   "$ARM_VM" "tcg,tb-size=256" "cortex-a710" no-note \
-  STUB_OS=Darwin STUB_ARCH=arm64 STUB_HV=0 STUB_SSBS=1
+  STUB_OS=Darwin STUB_ARCH=arm64 STUB_HV=0
 check "Linux x86_64 host, aarch64 guest → cross-arch TCG" \
   "$ARM_VM" "tcg,tb-size=256" "cortex-a710" no-note \
   STUB_OS=Linux STUB_ARCH=x86_64
 
-echo "== x86_64 guest (must be untouched by the SSBS probe) =="
-check "M4 host, x86_64 guest → cross-arch TCG, no SSBS note" \
+echo "== x86_64 guest (must be untouched by the AArch32 fallback) =="
+check "Apple Silicon host, x86_64 guest → cross-arch TCG, no note" \
   "$X86_VM" "tcg,tb-size=256" none no-note \
-  STUB_OS=Darwin STUB_ARCH=arm64 STUB_HV=1 STUB_SSBS=0
+  STUB_OS=Darwin STUB_ARCH=arm64 STUB_HV=1
 # The SeaBIOS x86 machine passes no -cpu at all, under any accelerator: the
 # -cpu host override exists for the OVMF/UEFI x86 machines (*.apple.*), where the
 # default qemu64 CPUID advertises AMD SVM and hangs OVMF.  Asserted so the

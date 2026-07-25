@@ -24,17 +24,17 @@ launching) while stubbing the host probes on `PATH`:
 
 - `uname -s` / `uname -m` → `STUB_OS` / `STUB_ARCH`
 - `sysctl -n kern.hv_support` → `STUB_HV`
-- `sysctl -n hw.optional.arm.FEAT_SSBS` → `STUB_SSBS` (`absent` makes the key missing)
 
-That stubbing is the point: the case the tests exist for — HVF available but
-`FEAT_SSBS=0`, which downgrades aarch64 to TCG ([#11](https://github.com/tikoci/mikropkl/issues/11))
-— needs Apple M4 hardware and cannot be reproduced on a CI runner, an Intel Mac,
-or pre-M4 Apple Silicon.
+That stubbing is the point: the case the tests exist for — HVF available on an
+Apple Silicon host, which downgrades aarch64 to TCG because CHR's arm64 `/init` is
+a 32-bit ARM binary the host cannot execute
+([#11](https://github.com/tikoci/mikropkl/issues/11)) — needs Apple Silicon hardware
+and cannot be reproduced on a CI runner or an Intel Mac.
 
 Requires `pkl` on `PATH`.  `pkl eval` reads random.org for the UTM identifier, so
 the test needs network and retries that step up to three times.
 
 **Adding a case:** call `check` with a description, the machine dir, the expected
 `-accel`, the expected `-cpu` (`none` asserts no `-cpu` flag, empty means don't
-care), whether the FEAT_SSBS note must appear (`note` / `no-note`), then the stub
+care), whether the AArch32 note must appear (`note` / `no-note`), then the stub
 environment.

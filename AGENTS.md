@@ -295,7 +295,7 @@ files (calls `bind()` early in init) but never reaches `listen()`, so socat clie
 under HVF — the guest reads the physical CPU ID registers either way, confirmed on an
 Apple M4 where `-cpu max` behaved identically ([#11](https://github.com/tikoci/mikropkl/issues/11)).
 A host feature gap therefore cannot be papered over with `-cpu`; see
-[FEAT_SSBS](#feat_ssbs-less-apple-hosts-m4-fall-back-to-tcg) below.
+[the AArch32 fallback](#aarch64-chr-falls-back-to-tcg-on-all-apple-silicon) below.
 
 The same fix applies to x86_64 HVF on macOS Intel (`chr.x86_64.apple`).  Without
 `-cpu host`, QEMU uses a default CPU model (e.g. `qemu64`) that requests AMD-specific
@@ -330,34 +330,38 @@ target; `-cpu host` is only needed when QEMU maps guest CPUID directly to hardwa
 **Secondary fix**: the workflow's socat serial capture now uses `retry=10,interval=1`
 so it handles the race window between QEMU calling `bind()` and `listen()`.
 
-### FEAT_SSBS-less Apple hosts (M4+) fall back to TCG
+### aarch64 CHR falls back to TCG on all Apple Silicon
 
-On Apple M4, aarch64 CHR under HVF panics right after the EFI stub hands over
+aarch64 CHR under HVF panics right after the EFI stub hands over
 (`Kernel panic - not syncing: No working init found`, t≈0.076s); TCG boots the same image.
-Under HVF the guest sees the physical CPU ID registers, so no `-cpu` model changes what it
-gets.  `FEAT_SSBS` (ARMv8.5 speculative-store-bypass control, absent on M4+, present on
-M1/M2/M3) is the only host property that measurably separates failing from working hosts,
-so it is what the fallback keys on — **a compatibility heuristic, not a proven mechanism**:
-upstream Linux 5.6 treats SSBS as optional (`has_ssbd_mitigation()` falls back to the SMCCC
-conduit), so causation is unproven.  Keep doc and commit wording at that altitude.
 
-`qemu.sh` therefore probes the feature before selecting HVF for an aarch64 guest:
+The image is **mixed-ISA**: an AArch64 Linux 5.6.3 kernel whose appended-initramfs
+`/init` is an ELF 32-bit ARM EABI5 binary, backed by an arm64 system package that is
+overwhelmingly ARM32 (≈101 executables + 18 shared objects vs 2 AArch64 executables).
+Apple Silicon implements no AArch32 at any exception level, and under HVF the guest reads
+the physical `ID_AA64PFR0_EL1` regardless of `-cpu`, so the guest kernel never sets
+`ARM64_HAS_32BIT_EL0`, `compat_elf_check_arch()` rejects `/init` with `-ENOEXEC`, and the
+initramfs has no fallback init.  The panic's own capability bitmap shows bit 13 absent
+under HVF (`0x20012,28000230`) and present under TCG `cortex-a710` (`0x20013,28402230`).
+
+`qemu.sh` therefore never selects HVF for an aarch64 guest on a Darwin/arm64 host:
 
 ```sh
-if [ "$(sysctl -n hw.optional.arm.FEAT_SSBS 2>/dev/null || echo 1)" = "0" ]; then
-  ACCEL="tcg,tb-size=256"; SSBS_TCG=1     # SSBS_TCG drives the banner note
-else
-  ACCEL="hvf"
-fi
+ACCEL="tcg,tb-size=256"
+ARM32_TCG=1     # ARM32_TCG drives the banner note
 ```
 
-Keyed on the feature rather than `machdep.cpu.brand_string` so it covers M5+ and any other
-SSBS-less chip; an absent/unreadable key means "has SSBS".  `QEMU_ACCEL=hvf` overrides.
-Grounded in [#11](https://github.com/tikoci/mikropkl/issues/11): `FEAT_SSBS=0` on the
-reporter's M4, `-cpu max` panics identically, `-cpu host,ssbs=on` errors with `Property
-'host-arm-cpu.ssbs' not found`.  No released QEMU injects SSBS under HVF (upstream shim is
-an unmerged RFC), so restoring HVF later needs a QEMU-version floor at this same site.
-`quickchr` uses the identical probe ([quickchr#98](https://github.com/tikoci/quickchr/pull/98)).
+This **supersedes** an earlier `sysctl hw.optional.arm.FEAT_SSBS` probe that scoped the
+fallback to M4+.  SSBS was an accidental marker for the first host reported and left
+M1/M2/M3 selecting an accelerator that cannot boot the image; do not reintroduce a
+host-feature predicate.
+
+`QEMU_ACCEL=hvf` overrides.  The restore signal is the *guest artifact* — a CHR arm64
+release whose `/init` and required userspace are AArch64 (every image through 7.23beta5
+still ships ELF32 ARM) — not a QEMU version floor.  Grounded in
+[#11](https://github.com/tikoci/mikropkl/issues/11); full chain in
+`quickchr/docs/m4-hvf-arm64-investigation.md`.  `quickchr` follows the same conclusion —
+keep the two in sync.
 
 ### Why `sysctl kern.hv_support` check before selecting HVF
 

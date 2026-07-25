@@ -149,14 +149,14 @@ jobs:
           echo "KVM_AVAIL=0" >> $GITHUB_ENV
           HV_SUPPORT=$(sysctl -n kern.hv_support 2>/dev/null || echo 0)
           echo "HV_SUPPORT=$HV_SUPPORT" >> $GITHUB_ENV
-          # Apple M4+ dropped FEAT_SSBS; qemu.sh downgrades aarch64 to TCG there
-          # because RouterOS's kernel panics under HVF (issue #11).
-          HOST_SSBS=$(sysctl -n hw.optional.arm.FEAT_SSBS 2>/dev/null || echo 1)
-          echo "HOST_SSBS=$HOST_SSBS" >> $GITHUB_ENV
-          if [ "$HV_SUPPORT" = "1" ] && [ "$HOST_SSBS" = "0" ]; then
-            echo "HVF available, but this host lacks FEAT_SSBS (Apple M4+) — aarch64"
-            echo "guests use TCG (RouterOS panics under HVF there); x86_64 is cross-arch, also TCG"
-            echo "::notice::host lacks FEAT_SSBS (Apple M4+) — aarch64 machines will use TCG"
+          # qemu.sh downgrades aarch64 to TCG on every Apple Silicon host: CHR's
+          # arm64 /init is a 32-bit ARM binary and Apple Silicon implements no
+          # AArch32, so the guest panics under HVF (issue #11).
+          HOST_ARCH=$(uname -m)
+          if [ "$HV_SUPPORT" = "1" ] && [ "$HOST_ARCH" = "arm64" ]; then
+            echo "HVF available, but arm64 CHR needs AArch32 that Apple Silicon does not"
+            echo "implement — aarch64 guests use TCG; x86_64 is cross-arch, also TCG"
+            echo "::notice::Apple Silicon host — aarch64 machines will use TCG (see issue #11)"
           elif [ "$HV_SUPPORT" = "1" ]; then
             echo "Using Hypervisor.framework (HVF) for native-arch guests, TCG for cross-arch"
           else
@@ -298,10 +298,11 @@ jobs:
             # HVF on macOS native-arch (if kern.hv_support=1), KVM on Linux native-arch, TCG for cross-arch
             if [ "$VM_ARCH" = "$HOST_ARCH_NORM" ] && [ "$OS_TYPE" = "Darwin" ] && [ "${HV_SUPPORT:-0}" = "1" ]; then
               EXPECTED_ACCEL="hvf"
-              # ...except aarch64 on FEAT_SSBS-less Apple silicon (M4+), where
-              # qemu.sh deliberately picks TCG (issue #11) — mirror that here so
-              # the accel assertion and the boot timeout stay correct.
-              if [ "$VM_ARCH" = "aarch64" ] && [ "${HOST_SSBS:-1}" = "0" ]; then
+              # ...except aarch64 on Apple Silicon, where qemu.sh deliberately
+              # picks TCG because CHR's arm64 userspace is 32-bit ARM and the
+              # host has no AArch32 (issue #11) — mirror that here so the accel
+              # assertion and the boot timeout stay correct.
+              if [ "$VM_ARCH" = "aarch64" ]; then
                 EXPECTED_ACCEL="tcg"
               fi
             elif [ "$VM_ARCH" = "$HOST_ARCH_NORM" ] && [ "$KVM_AVAIL" = "1" ]; then

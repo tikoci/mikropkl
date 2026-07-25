@@ -218,10 +218,11 @@ function launchScript(
   cd "$SCRIPT_DIR"
 
   # ── Accelerator detection ──
-  # SSBS_TCG is set to 1 when HVF was available but deliberately skipped because
-  # the host omits FEAT_SSBS (see the Darwin branch below); it drives a one-line
-  # note in the launch banner so the slower accelerator is never silent.
-  SSBS_TCG=0
+  # ARM32_TCG is set to 1 when HVF was available but deliberately skipped because
+  # the guest image needs AArch32 that the host cannot provide (see the Darwin
+  # branch below); it drives a one-line note in the launch banner so the slower
+  # accelerator is never silent.
+  ARM32_TCG=0
   ACCEL="${QEMU_ACCEL:-}"
   if [ -z "$ACCEL" ]; then
     HOST_ARCH="$(uname -m)"
@@ -242,30 +243,27 @@ function launchScript(
         if [ "$HV_SUPPORT" = "1" ] && [ "$HOST_ARCH" = "x86_64" ] && [ "\(archBin)" = "x86_64" ]; then
           ACCEL="hvf"
         elif [ "$HV_SUPPORT" = "1" ] && [ "$HOST_ARCH" = "arm64" ] && [ "\(archBin)" = "aarch64" ]; then
-          # Observed on Apple M4: aarch64 CHR panics moments into the guest
-          # kernel under HVF ("No working init found", t~0.076s) while TCG boots
-          # the same image.  Under HVF the guest reads the *physical* CPU ID
-          # registers — the -cpu model is inert (-cpu max panics identically) —
-          # and QEMU 11.0.2 has no ssbs property, so nothing host-side avoids the
-          # difference; TCG is what boots today.
+          # aarch64 CHR cannot boot under HVF on *any* Apple Silicon host, so
+          # TCG is selected unconditionally here.  The image is mixed-ISA: the
+          # kernel is AArch64, but the /init it execs is a 32-bit ARM (EABI5)
+          # binary, as is most of the system package.  Apple Silicon implements
+          # no AArch32 at any exception level, and under HVF the guest reads the
+          # physical ID registers (the -cpu model is inert — -cpu max panics
+          # identically), so the guest kernel never sets ARM64_HAS_32BIT_EL0,
+          # compat_elf_check_arch() rejects /init with -ENOEXEC, and the boot
+          # ends in "No working init found" ~0.08s in.  TCG's cortex-a710 does
+          # provide AArch32 EL0, which is why the identical image boots there.
           #
-          # FEAT_SSBS=0 is the fallback key because it is the only host property
-          # we can measure that separates the failing hosts (M4+) from the
-          # working ones (M1/M2/M3 report 1) — a conservative compatibility
-          # heuristic, not a proven mechanism.  Upstream Linux 5.6 treats SSBS as
-          # optional (falls back to the SMCCC workaround), so "the kernel needs
-          # SSBS" is a suspect, not a demonstrated cause.  See issue #11.
+          # This supersedes the earlier FEAT_SSBS=0 (M4+) probe: SSBS was only
+          # an accidental marker for the first host reported, and left M1/M2/M3
+          # selecting HVF for a guest that cannot run on it.  See issue #11.
           #
-          # Keyed on the feature rather than machdep.cpu.brand_string so it
-          # scopes to measured host state and covers M5+ without a new match arm.
-          # A missing/unreadable sysctl means "has SSBS" (older macOS lacks the
-          # key).  QEMU_ACCEL=hvf still overrides, for retesting newer QEMU.
-          if [ "$(sysctl -n hw.optional.arm.FEAT_SSBS 2>/dev/null || echo 1)" = "0" ]; then
-            ACCEL="tcg,tb-size=256"
-            SSBS_TCG=1
-          else
-            ACCEL="hvf"
-          fi
+          # Restore signal is the *guest artifact*, not the host or QEMU: a CHR
+          # arm64 release whose /init and required userspace are AArch64.  Every
+          # image through 7.23beta5 still ships ELF32 ARM.  QEMU_ACCEL=hvf
+          # overrides, which is how a future fixed image gets tested.
+          ACCEL="tcg,tb-size=256"
+          ARM32_TCG=1
         else
           ACCEL="tcg,tb-size=256"
         fi
@@ -331,7 +329,8 @@ function launchScript(
   # clients see "Connection refused" rather than a clear error).  Use -cpu host.
   # This only fixes *starting* QEMU: under HVF the CPU model is inert, the guest
   # reads the physical ID registers regardless (-cpu max behaves identically on
-  # an M4) — see the FEAT_SSBS note in accelerator detection above.
+  # an M4) — which is why no -cpu model restores the AArch32 EL0 that CHR's
+  # 32-bit /init needs.  See the AArch32 note in accelerator detection above.
   if [ "$ACCEL" = "hvf" ]; then
     CPU_FLAGS="-cpu host"
   fi
@@ -491,8 +490,8 @@ function launchScript(
 
   if [ "$DRY_RUN" = "1" ]; then
     # Note on stderr so stdout stays a clean, pipeable command line.
-    if [ "$SSBS_TCG" = "1" ]; then
-      echo "note: host omits FEAT_SSBS (Apple M4+) — TCG selected; QEMU_ACCEL=hvf to retest" >&2
+    if [ "$ARM32_TCG" = "1" ]; then
+      echo "note: arm64 CHR needs AArch32, Apple Silicon has none — TCG selected; QEMU_ACCEL=hvf to retest" >&2
     fi
     echo "$CMD"
     exit 0
@@ -527,11 +526,12 @@ function launchScript(
   esac
 
   # Explain the HVF→TCG downgrade rather than silently running slower.
-  if [ "$SSBS_TCG" = "1" ]; then
+  if [ "$ARM32_TCG" = "1" ]; then
     echo ""
-    echo "  ${_Y}Note:${_R} this Apple CPU omits ${_B}FEAT_SSBS${_R} (M4 and later).  RouterOS's kernel"
-    echo "        panics under ${_B}-accel hvf${_R} there, so TCG is used instead — slower, but it boots."
-    echo "        Retest HVF with ${_B}QEMU_ACCEL=hvf${_R};  see ${DOCS_URL}#hvf-on-apple-m4-and-later"
+    echo "  ${_Y}Note:${_R} RouterOS's arm64 image runs a ${_B}32-bit ARM${_R} init, and Apple Silicon has"
+    echo "        no AArch32 — under ${_B}-accel hvf${_R} the guest panics with \\"No working init"
+    echo "        found\\".  TCG is used instead — slower, but it boots."
+    echo "        Retest HVF with ${_B}QEMU_ACCEL=hvf${_R};  see ${DOCS_URL}#hvf-on-apple-silicon"
   fi
 
   if [ "$BACKGROUND" = "1" ]; then
