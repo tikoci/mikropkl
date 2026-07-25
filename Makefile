@@ -8,7 +8,7 @@
 # NOTE: No "partial" build - so a build will overwrite disks!
 #   Thus, while VMs will run from the /Machines directory, any changes will be lost on next `make`. 
 
-.PHONY: all prereq phase1 phase2 pkl clean distclean
+.PHONY: all prereq phase1 phase2 pkl clean distclean test
 .SUFFIXES: 
 
 # basic build "from" and "to" here...
@@ -40,6 +40,12 @@ clean:
 distclean: clean
 	$(info cleaning $(CACHE_DIR))
 	rm -rf ./$(CACHE_DIR)
+
+# Anchor tests — no QEMU, no disk images, no build output touched.
+# Tests/accel-detect.sh generates launchers into a temp dir and checks the
+# accelerator decision table with stubbed host probes (see Tests/README.md).
+test:
+	sh ./Tests/accel-detect.sh $(CHR_VERSION_TEST)
 
 # pkl creates the initial files /Manifasts to kickstart a UTM ZIP
 phase1: pkl

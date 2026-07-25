@@ -64,7 +64,9 @@ jobs:
           INPUT: ${{ github.event.inputs.versions }}
           PREFIX: ${{ github.event.inputs.tagprefix }}
         run: |
-          set -eu
+          # pipefail matters here: `gh release list --limit 0` fails but pipes
+          # nothing into jq, which exits 0 — the failure would otherwise be lost.
+          set -euo pipefail
           case "$INPUT" in
             latest)    LIMIT=1 ;;
             latest:*)  LIMIT="${INPUT#latest:}" ;;
@@ -74,6 +76,7 @@ jobs:
             case "$LIMIT" in
               ''|*[!0-9]*) echo "::error::latest:N needs a number, got '$LIMIT'"; exit 1 ;;
             esac
+            [ "$LIMIT" -ge 1 ] || { echo "::error::latest:N needs N >= 1, got '$LIMIT'"; exit 1; }
             # Newest releases first, tag prefix stripped back to a bare version.
             # ltrimstr (literal) not sub (regex), so a prefix containing regex
             # metacharacters is handled correctly; --arg keeps the input out of
@@ -81,7 +84,16 @@ jobs:
             VERSIONS=$(gh release list --limit "$LIMIT" --json tagName \
               | jq -c --arg prefix "$PREFIX" '[.[].tagName | ltrimstr($prefix)]')
           else
-            VERSIONS=$(printf '%s\n' "$INPUT" | tr ' ' '\n' | grep -v '^$' | jq -R -s -c 'split("\n")[:-1]')
+            # `grep -v` exits 1 on whitespace-only input; tolerate it here so the
+            # empty-list check below reports it, rather than a bare shell failure.
+            VERSIONS=$(printf '%s\n' "$INPUT" | tr ' ' '\n' | { grep -v '^$' || true; } | jq -R -s -c 'split("\n")[:-1]')
+          fi
+          # An empty list would become an empty matrix — the refresh job would be
+          # skipped and the run would go green having done nothing.  Fail instead.
+          COUNT=$(printf '%s' "${VERSIONS:-}" | jq 'if type == "array" then length else 0 end' 2>/dev/null || echo 0)
+          if [ -z "$COUNT" ] || [ "$COUNT" = "0" ]; then
+            echo "::error::no versions resolved from '$INPUT' — nothing to refresh"
+            exit 1
           fi
           # Each matrix value ends up in a shell command and a URL, and the input
           # is free-form — reject anything that is not a RouterOS version
@@ -148,10 +160,11 @@ jobs:
           echo "::endgroup::"
           ls /tmp/fresh
 
-      - name: Refresh qemu.sh inside each published asset
+      - name: Refresh the launch scripts inside each published asset
         run: |
           set -eu
           CHANGED=""
+          CFG_CHANGED=""
           mkdir -p /tmp/work
           for ASSET in $(gh release view "$TAG" --json assets --jq '.assets[].name | select(endswith(".utm.zip"))'); do
             MACHINE="${ASSET%.zip}"
@@ -164,29 +177,44 @@ jobs:
             rm -rf "/tmp/work/$MACHINE" "/tmp/$ASSET"
             gh release download "$TAG" --pattern "$ASSET" --dir /tmp
             unzip -q "/tmp/$ASSET" -d /tmp/work
-            OLD="/tmp/work/$MACHINE/qemu.sh"
-            NEW="/tmp/fresh/$MACHINE/qemu.sh"
-            if cmp -s "$OLD" "$NEW"; then
-              echo "already current: qemu.sh unchanged"
-              echo "::endgroup::"
-              continue
+
+            # Decide per file, so `replacecfg=true` still works on an asset whose
+            # qemu.sh is already current (and so a re-run can recover an upload
+            # whose release-note step failed).
+            SH_STALE=0; CFG_STALE=0
+            cmp -s "/tmp/work/$MACHINE/qemu.sh"  "/tmp/fresh/$MACHINE/qemu.sh"  || SH_STALE=1
+            cmp -s "/tmp/work/$MACHINE/qemu.cfg" "/tmp/fresh/$MACHINE/qemu.cfg" || CFG_STALE=1
+
+            if [ "$SH_STALE" = "1" ]; then
+              diff -u "/tmp/work/$MACHINE/qemu.sh" "/tmp/fresh/$MACHINE/qemu.sh" || true
+              cp "/tmp/fresh/$MACHINE/qemu.sh" "/tmp/work/$MACHINE/qemu.sh"
+              chmod a+x "/tmp/work/$MACHINE/qemu.sh"
+            else
+              echo "qemu.sh already current"
             fi
-            diff -u "$OLD" "$NEW" || true
-            cp "$NEW" "$OLD"
-            chmod a+x "$OLD"
+
             # qemu.cfg is expected to be stable (its MAC is derived deterministically
             # from the machine name) — report drift rather than silently changing the
             # machine definition, since config.plist is intentionally left untouched.
-            if ! cmp -s "/tmp/work/$MACHINE/qemu.cfg" "/tmp/fresh/$MACHINE/qemu.cfg"; then
+            REPLACED_CFG=0
+            if [ "$CFG_STALE" = "1" ]; then
               diff -u "/tmp/work/$MACHINE/qemu.cfg" "/tmp/fresh/$MACHINE/qemu.cfg" || true
               if [ "$REPLACECFG" = "true" ]; then
                 echo "NOTE: replacing qemu.cfg (replacecfg=true)"
                 cp "/tmp/fresh/$MACHINE/qemu.cfg" "/tmp/work/$MACHINE/qemu.cfg"
+                REPLACED_CFG=1
               else
                 echo "WARNING: qemu.cfg differs from the published asset — left as published."
                 echo "         Re-run with replacecfg=true if the new definition is intended."
               fi
             fi
+
+            if [ "$SH_STALE" = "0" ] && [ "$REPLACED_CFG" = "0" ]; then
+              echo "nothing to do for $ASSET"
+              echo "::endgroup::"
+              continue
+            fi
+
             rm -f "/tmp/$ASSET"
             ( cd /tmp/work && zip -q -r "/tmp/$ASSET" "$MACHINE" )
             if [ "$DRYRUN" = "true" ]; then
@@ -196,32 +224,52 @@ jobs:
               echo "uploaded $ASSET"
             fi
             CHANGED="$CHANGED $MACHINE"
+            [ "$REPLACED_CFG" = "1" ] && CFG_CHANGED="$CFG_CHANGED $MACHINE" || true
             echo "::endgroup::"
           done
           {
             echo "### $TAG"
             if [ -z "$CHANGED" ]; then
-              echo "No asset needed a new \`qemu.sh\`."
+              echo "No asset needed a refresh."
             else
-              echo "Refreshed \`qemu.sh\` in:"
-              for M in $CHANGED; do echo "- \`$M.zip\`"; done
+              echo "Refreshed:"
+              for M in $CHANGED; do
+                case " $CFG_CHANGED " in
+                  *" $M "*) echo "- \`$M.zip\` — \`qemu.sh\` + \`qemu.cfg\`" ;;
+                  *)        echo "- \`$M.zip\` — \`qemu.sh\`" ;;
+                esac
+              done
               if [ "$DRYRUN" = "true" ]; then
                 echo ""
                 echo "_(dry run — nothing uploaded)_"
               fi
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "REFRESHED=$CHANGED" >> "$GITHUB_ENV"
+          # Trim the leading separator so the value is exactly the machine list.
+          echo "REFRESHED=${CHANGED# }" >> "$GITHUB_ENV"
+          echo "REFRESHED_CFG=${CFG_CHANGED# }" >> "$GITHUB_ENV"
 
       - name: Record the refresh in the release notes
         if: ${{ github.event.inputs.dryrun != 'true' }}
         run: |
           set -eu
           [ -n "${REFRESHED:-}" ] || { echo "nothing refreshed — release notes untouched"; exit 0; }
+          SHORT_SHA="${GITHUB_SHA:0:7}"
           gh release view "$TAG" --json body --jq .body > /tmp/body.md
+          # Idempotent: a re-run from the same commit must not stack notes.
+          if grep -qF "launch scripts refreshed" /tmp/body.md && grep -qF "$SHORT_SHA" /tmp/body.md; then
+            echo "release notes already record a refresh from $SHORT_SHA — leaving them alone"
+            exit 0
+          fi
+          # shellcheck disable=SC2016  # backticks are markdown, not substitution
+          if [ -n "${REFRESHED_CFG:-}" ]; then
+            WHAT='`qemu.sh` and `qemu.cfg` were replaced'
+          else
+            WHAT='Only `qemu.sh` was replaced'
+          fi
           {
             echo ""
-            echo "> **QEMU launch scripts refreshed** $(date -u +%Y-%m-%d) from \`${GITHUB_SHA:0:7}\`."
-            echo "> Only \`qemu.sh\` was replaced — the VM definition and disk image are unchanged."
+            echo "> **QEMU launch scripts refreshed** $(date -u +%Y-%m-%d) from \`$SHORT_SHA\`."
+            echo "> $WHAT — \`config.plist\` (VM identity) and the disk image are unchanged."
           } >> /tmp/body.md
           gh release edit "$TAG" --notes-file /tmp/body.md

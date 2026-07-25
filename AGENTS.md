@@ -332,11 +332,14 @@ so it handles the race window between QEMU calling `bind()` and `listen()`.
 
 ### FEAT_SSBS-less Apple hosts (M4+) fall back to TCG
 
-Apple's M4 removed `FEAT_SSBS` (ARMv8.5 speculative-store-bypass control).  Under HVF the
-guest sees the physical CPU ID registers, so the missing feature reaches RouterOS's Linux
-5.6.3 kernel — which assumes it is present and panics right after the EFI stub hands over
-(`Kernel panic - not syncing: No working init found`, t≈0.076s).  TCG boots the same image
-because its fixed `cortex-a710` model advertises SSBS.
+On Apple M4, aarch64 CHR under HVF panics right after the EFI stub hands over
+(`Kernel panic - not syncing: No working init found`, t≈0.076s); TCG boots the same image.
+Under HVF the guest sees the physical CPU ID registers, so no `-cpu` model changes what it
+gets.  `FEAT_SSBS` (ARMv8.5 speculative-store-bypass control, absent on M4+, present on
+M1/M2/M3) is the only host property that measurably separates failing from working hosts,
+so it is what the fallback keys on — **a compatibility heuristic, not a proven mechanism**:
+upstream Linux 5.6 treats SSBS as optional (`has_ssbd_mitigation()` falls back to the SMCCC
+conduit), so causation is unproven.  Keep doc and commit wording at that altitude.
 
 `qemu.sh` therefore probes the feature before selecting HVF for an aarch64 guest:
 

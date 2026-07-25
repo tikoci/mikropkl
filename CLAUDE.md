@@ -35,12 +35,14 @@ Files/
   efi_vars.fd         ← UEFI variable store (copied into Apple-backend bundles)
   QEMU.md             ← user-facing QEMU deployment guide
 Machines/             ← build output (git-ignored except .url/.size placeholders)
+Tests/                ← anchor tests (see Tests/README.md); `make test`, no QEMU needed
 Lab/                  ← local experiments, debug scripts, investigation notes (NOT build artifacts)
   libvirt/            ← libvirt experiment docs and notes (see LIBVIRT.md inside)
   qemu-arm64/         ← QEMU aarch64 boot investigation (see NOTES.md inside)
   x86-direct-kernel/  ← x86 direct kernel boot experiments (see NOTES.md inside)
 .github/workflows/
   chr.yaml            ← builds and releases UTM packages to GitHub Releases
+  test.yaml           ← anchor tests on push/PR (no QEMU): accel decision table
   qemu-test.yaml      ← boots each QEMU machine via qemu.sh and runs REST API checks
   libvirt-test.yaml   ← historical: precursor to qemu-test.yaml (parses XML → raw QEMU)
   auto.yaml           ← automated trigger for chr.yaml on new RouterOS versions
@@ -611,6 +613,7 @@ make qemu-status
 | `qemu-test.yaml` | manual dispatch | Boots each QEMU machine via qemu.sh and runs REST API checks |
 | `libvirt-test.yaml` | manual dispatch | Historical: precursor to qemu-test.yaml (parses XML → raw QEMU) |
 | `refresh-scripts.yaml` | manual dispatch | Replaces `qemu.sh` inside already-published release assets (see below) |
+| `test.yaml` | push / PR | Anchor tests — pkl evaluates, `qemu.sh` accel decision table (`Tests/`) |
 
 ### refresh-scripts.yaml — Fixing `qemu.sh` in already-published releases
 
@@ -695,10 +698,8 @@ rather than failing immediately if QEMU hasn't called `listen()` yet.
 
 #### macOS HVF — FEAT_SSBS-less Apple hosts (M4+) fall back to TCG
 
-Apple's M4 **removed `FEAT_SSBS`** (the ARMv8.5 speculative-store-bypass control).
-Under HVF the guest reads the physical CPU ID registers, so the missing feature reaches
-RouterOS's Linux 5.6.3 kernel, which assumes it is present and panics immediately after
-the EFI stub hands over:
+On Apple M4, aarch64 CHR under HVF starts the guest kernel and then panics immediately
+after the EFI stub hands over; TCG boots the identical image:
 
 ```text
 EFI stub: Exiting boot services and installing virtual address map...
@@ -710,10 +711,21 @@ not reproducible locally (this is an Intel Mac; aarch64 HVF needs Apple Silicon)
 
 | Probe on M4 | Result | Conclusion |
 |---|---|---|
-| `sysctl -n hw.optional.arm.FEAT_SSBS` | `0` (M1/M2 report `1`) | feature really is absent |
+| `sysctl -n hw.optional.arm.FEAT_SSBS` | `0` (M1/M2 report `1`) | the only measured host delta |
 | `-accel hvf -cpu max` | identical panic | `-cpu` model is inert under HVF |
 | `-cpu host,ssbs=on` / `=off` | `Property 'host-arm-cpu.ssbs' not found` | QEMU 11.0.2 cannot inject it |
-| `QEMU_ACCEL=tcg` (`-cpu cortex-a710`) | boots normally | TCG's fixed model advertises SSBS |
+| `QEMU_ACCEL=tcg` (`-cpu cortex-a710`) | boots normally | fixed model advertises SSBS |
+
+**What this does and does not establish.**  Established: the panic is HVF-only on an
+SSBS-less host, no `-cpu` model or QEMU property changes it, and TCG boots.  *Not*
+established: that the missing `FEAT_SSBS` is the mechanism.  Upstream Linux 5.6 treats
+SSBS as an optional capability — `has_ssbd_mitigation()` in `arch/arm64/kernel/cpu_errata.c`
+falls back to the SMCCC `ARCH_WORKAROUND_2` conduit and merely records
+`ARM64_SSBD_UNKNOWN` when there is none; nothing there panics.  MikroTik's kernel is
+patched and could differ, but we have not shown it, and `No working init found` is a
+userspace-exec failure rather than a CPU-feature trap.  So `FEAT_SSBS=0` is used as **the
+probe that scopes precisely to the affected hosts** — a conservative compatibility
+heuristic — and any doc/commit wording should stay at that altitude.
 
 **Fix in `qemu.sh`** — probe the feature, not the chip name:
 
@@ -727,9 +739,10 @@ fi
 ```
 
 Why the feature axis and not `machdep.cpu.brand_string = "Apple M4"*` (the first
-attempt at this fix): the sysctl *is* the failure condition, so it also covers M5+ and
-any future SSBS-less chip, and it does not bake a chip marketing name into permanent
-policy.  A missing or unreadable key means "has SSBS" (older macOS lacks the key).
+attempt at this fix): the sysctl is measured host state rather than a marketing name, so
+it covers M5+ and any future SSBS-less chip without a new match arm, and it is the same
+axis `quickchr` keys on.  A missing or unreadable key means "has SSBS" (older macOS lacks
+the key).
 `QEMU_ACCEL=hvf` still overrides, for retesting new QEMU builds.  The downgrade is never
 silent — the banner explains it and points at
 [QEMU.md#hvf-on-apple-m4-and-later](https://github.com/tikoci/mikropkl/blob/main/Files/QEMU.md#hvf-on-apple-m4-and-later).
@@ -746,7 +759,9 @@ the two in sync.
 **Open (needs a real M4):** does a modern arm64 Linux boot under the same
 `-accel hvf -cpu host`?  A boot confirms RouterOS's old kernel is specifically
 implicated; a panic makes it a general M4 + HVF + QEMU issue.  Either way the fallback is
-correct today.
+correct today.  A guest-side confirmation of the mechanism would need RouterOS kernel
+internals we cannot inspect (no shell, no `dmesg` beyond the serial console) — which is
+precisely why the wording stays at "heuristic".
 
 #### CI conventions for `apt-get` and downloads
 

@@ -734,26 +734,32 @@ under TCG and prints:
         panics under -accel hvf there, so TCG is used instead — slower, but it boots.
 ```
 
-Under HVF the guest runs on the physical CPU, so it sees the real CPU ID
-registers — the `-cpu` model has no effect on which features are advertised.
-Apple's M4 dropped `FEAT_SSBS` (an ARMv8.5 speculative-store-bypass control) that
-RouterOS's Linux 5.6.3 kernel expects, so the guest kernel panics moments after
-the EFI stub hands over:
+What is actually observed on an M4: the guest kernel starts and then panics
+moments after the EFI stub hands over, while TCG boots the identical image.
 
 ```text
+EFI stub: Exiting boot services and installing virtual address map...
 Kernel panic - not syncing: No working init found.
 ```
 
-Detection is by CPU feature, not by chip name:
+Under HVF the guest runs on the physical CPU and reads the real CPU ID registers,
+so the `-cpu` model has no effect on the features it sees — `-cpu max` panics
+identically, and `-cpu host,ssbs=on` is rejected outright
+(`Property 'host-arm-cpu.ssbs' not found`).  No released QEMU can inject the bit
+under HVF, so there is no host-side setting that avoids it; TCG is what boots.
+
+The fallback is keyed on a CPU feature rather than a chip name:
 
 ```sh
 sysctl -n hw.optional.arm.FEAT_SSBS     # 0 on M4+, 1 on M1/M2/M3
 ```
 
-Nothing on the host side works around it today: `-cpu max` panics identically,
-`-cpu host,ssbs=on` is rejected (`Property 'host-arm-cpu.ssbs' not found`), and no
-released QEMU injects the bit under HVF.  TCG's fixed `cortex-a710` model does
-advertise `FEAT_SSBS`, which is why emulation boots.
+`FEAT_SSBS` (an ARMv8.5 speculative-store-bypass control) is used because it is
+the only host property that measurably separates the hosts that fail from the ones
+that work, and it is cheap to probe.  Treat it as a **compatibility heuristic, not
+a proven mechanism** — upstream Linux 5.6 treats SSBS as optional, so "the kernel
+needs SSBS" remains the leading suspect rather than a demonstrated cause.  TCG's
+fixed `cortex-a710` model does advertise the feature, which fits the pattern.
 
 To retest once QEMU or RouterOS changes, force it explicitly:
 

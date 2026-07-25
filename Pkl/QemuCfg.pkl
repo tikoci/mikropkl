@@ -242,20 +242,24 @@ function launchScript(
         if [ "$HV_SUPPORT" = "1" ] && [ "$HOST_ARCH" = "x86_64" ] && [ "\(archBin)" = "x86_64" ]; then
           ACCEL="hvf"
         elif [ "$HV_SUPPORT" = "1" ] && [ "$HOST_ARCH" = "arm64" ] && [ "\(archBin)" = "aarch64" ]; then
-          # Apple M4 (and later) dropped FEAT_SSBS, an ARMv8.5 speculative-store
-          # control.  Under HVF the guest reads the *physical* CPU ID registers —
-          # the -cpu model is inert — so the missing feature reaches RouterOS's
-          # Linux 5.6.3 kernel, which assumes it is present and panics at init
-          # ("No working init found", t~0.076s).  No released QEMU can inject
-          # SSBS under HVF (the shim is an unmerged upstream RFC), so TCG is the
-          # only accelerator that boots on such a host today.
+          # Observed on Apple M4: aarch64 CHR panics moments into the guest
+          # kernel under HVF ("No working init found", t~0.076s) while TCG boots
+          # the same image.  Under HVF the guest reads the *physical* CPU ID
+          # registers — the -cpu model is inert (-cpu max panics identically) —
+          # and QEMU 11.0.2 has no ssbs property, so nothing host-side avoids the
+          # difference; TCG is what boots today.
           #
-          # Keyed on the feature, not on machdep.cpu.brand_string: the sysctl is
-          # the actual failure condition, so it also covers M5+ and any other
-          # SSBS-less chip, and it does not bake a CPU marketing name into
-          # permanent policy.  A missing/unreadable sysctl means "has SSBS"
-          # (pre-M4 silicon reports 1; older macOS lacks the key entirely).
-          # QEMU_ACCEL=hvf still overrides, for retesting future QEMU builds.
+          # FEAT_SSBS=0 is the fallback key because it is the only host property
+          # we can measure that separates the failing hosts (M4+) from the
+          # working ones (M1/M2/M3 report 1) — a conservative compatibility
+          # heuristic, not a proven mechanism.  Upstream Linux 5.6 treats SSBS as
+          # optional (falls back to the SMCCC workaround), so "the kernel needs
+          # SSBS" is a suspect, not a demonstrated cause.  See issue #11.
+          #
+          # Keyed on the feature rather than machdep.cpu.brand_string so it
+          # scopes to measured host state and covers M5+ without a new match arm.
+          # A missing/unreadable sysctl means "has SSBS" (older macOS lacks the
+          # key).  QEMU_ACCEL=hvf still overrides, for retesting newer QEMU.
           if [ "$(sysctl -n hw.optional.arm.FEAT_SSBS 2>/dev/null || echo 1)" = "0" ]; then
             ACCEL="tcg,tb-size=256"
             SSBS_TCG=1
