@@ -20,6 +20,11 @@ concurrency:
   group: refresh-scripts
   cancel-in-progress: false
 
+# Deny by default; each job re-grants exactly what it needs (plan: contents:read,
+# refresh: contents:write).  Without this, a job added later without a
+# `permissions:` block would silently inherit the repository default token scope.
+permissions: {}
+
 on:
   workflow_dispatch:
     inputs:

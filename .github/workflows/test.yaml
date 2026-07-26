@@ -51,6 +51,18 @@ jobs:
           echo "::endgroup::"
           # Every generated launcher must be valid POSIX sh — Ubuntu runs these
           # under dash, which is stricter than bash.
+          #
+          # Accumulate into RC rather than relying on the loop's exit status: a
+          # `for` loop reports only its *last* iteration, and `set -e` exempts the
+          # left-hand side of `&&`, so a failing launcher earlier in the glob would
+          # otherwise pass the step silently.
+          RC=0
           for SH in /tmp/all/*/qemu.sh; do
-            sh -n "$SH" && echo "ok: sh -n $SH"
+            if sh -n "$SH"; then
+              echo "ok: sh -n $SH"
+            else
+              echo "FAIL: sh -n $SH"
+              RC=1
+            fi
           done
+          exit "$RC"

@@ -36,6 +36,11 @@ on:
         description: 'Include macOS runner (costs more, HVF unavailable on GitHub-hosted VMs)'
         required: false
         default: false
+      accel:
+        type: string
+        description: 'Force accelerator via QEMU_ACCEL (e.g. hvf, tcg, kvm) — blank means qemu.sh auto-detects'
+        required: false
+        default: ""
 
 jobs:
   # ── Phase 1: build all QEMU machine bundles ───────────────────────────────
@@ -92,6 +97,11 @@ jobs:
 
     env:
       HEALTH_PORT_BASE: "9180"
+      # Passed through to qemu.sh, which honours QEMU_ACCEL ahead of its own
+      # detection.  Blank leaves auto-detection alone.  This is the only way to
+      # exercise HVF for an aarch64 guest now that Apple Silicon always falls
+      # back to TCG (issue #11) — useful on a self-hosted Apple Silicon runner.
+      QEMU_ACCEL: ${{ inputs.accel }}
 
     steps:
       - name: Checkout repository
@@ -153,7 +163,9 @@ jobs:
           # arm64 /init is a 32-bit ARM binary and Apple Silicon implements no
           # AArch32, so the guest panics under HVF (issue #11).
           HOST_ARCH=$(uname -m)
-          if [ "$HV_SUPPORT" = "1" ] && [ "$HOST_ARCH" = "arm64" ]; then
+          if [ -n "${QEMU_ACCEL:-}" ]; then
+            echo "::notice::QEMU_ACCEL=$QEMU_ACCEL forced by dispatch input — auto-detection bypassed"
+          elif [ "$HV_SUPPORT" = "1" ] && [ "$HOST_ARCH" = "arm64" ]; then
             echo "HVF available, but arm64 CHR needs AArch32 that Apple Silicon does not"
             echo "implement — aarch64 guests use TCG; x86_64 is cross-arch, also TCG"
             echo "::notice::Apple Silicon host — aarch64 machines will use TCG (see issue #11)"
@@ -295,8 +307,15 @@ jobs:
             VM_DISKS=$(pkl eval -x 'Drive.toList().length' "$CFG_PKL")
 
             # ── Determine expected accelerator ──
+            # Mirror qemu.sh's precedence exactly: it reads QEMU_ACCEL *before*
+            # any host detection, so an explicit override wins here too —
+            # otherwise the accel assertion and boot timeout below would both be
+            # wrong whenever the workflow is dispatched with `accel`.
+            # Strip any suffix (qemu.sh uses "tcg,tb-size=256") for comparison.
+            if [ -n "${QEMU_ACCEL:-}" ]; then
+              EXPECTED_ACCEL="${QEMU_ACCEL%%,*}"
             # HVF on macOS native-arch (if kern.hv_support=1), KVM on Linux native-arch, TCG for cross-arch
-            if [ "$VM_ARCH" = "$HOST_ARCH_NORM" ] && [ "$OS_TYPE" = "Darwin" ] && [ "${HV_SUPPORT:-0}" = "1" ]; then
+            elif [ "$VM_ARCH" = "$HOST_ARCH_NORM" ] && [ "$OS_TYPE" = "Darwin" ] && [ "${HV_SUPPORT:-0}" = "1" ]; then
               EXPECTED_ACCEL="hvf"
               # ...except aarch64 on Apple Silicon, where qemu.sh deliberately
               # picks TCG because CHR's arm64 userspace is 32-bit ARM and the
