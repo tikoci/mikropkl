@@ -285,13 +285,17 @@ OVMF firmware paths searched (in order):
 
 ### Why `-cpu host` for HVF on macOS (not `cortex-a710`)
 
-`cortex-a710` is an ARMv9.0 CPU model.  ARMv9.0 mandates SVE2 as a core feature.
-Apple M-series chips (used in GitHub Actions `macos-15` runners) implement ARMv8.5/8.6,
-not ARMv9.  When QEMU tries to set up `cortex-a710` with `-accel hvf`, the HVF backend
-cannot satisfy the SVE2 requirement, and QEMU crashes during CPU initialization — before
+HVF runs the guest on the host CPU via Hypervisor.framework, so a fixed CPU model such
+as `cortex-a710` cannot be instantiated — QEMU crashes during CPU initialization, before
 actually starting the VM.  The crash is subtle: QEMU creates the chardev Unix socket
 files (calls `bind()` early in init) but never reaches `listen()`, so socat clients get
 "Connection refused" rather than a proper error message.
+
+`-cpu host` only fixes *starting* QEMU.  For feature advertisement the model is inert
+under HVF — the guest reads the physical CPU ID registers either way, confirmed on an
+Apple M4 where `-cpu max` behaved identically ([#11](https://github.com/tikoci/mikropkl/issues/11)).
+A host feature gap therefore cannot be papered over with `-cpu`; see
+[the AArch32 fallback](#aarch64-chr-falls-back-to-tcg-on-all-apple-silicon) below.
 
 The same fix applies to x86_64 HVF on macOS Intel (`chr.x86_64.apple`).  Without
 `-cpu host`, QEMU uses a default CPU model (e.g. `qemu64`) that requests AMD-specific
@@ -325,6 +329,39 @@ target; `-cpu host` is only needed when QEMU maps guest CPUID directly to hardwa
 
 **Secondary fix**: the workflow's socat serial capture now uses `retry=10,interval=1`
 so it handles the race window between QEMU calling `bind()` and `listen()`.
+
+### aarch64 CHR falls back to TCG on all Apple Silicon
+
+aarch64 CHR under HVF panics right after the EFI stub hands over
+(`Kernel panic - not syncing: No working init found`, t≈0.076s); TCG boots the same image.
+
+The image is **mixed-ISA**: an AArch64 Linux 5.6.3 kernel whose appended-initramfs
+`/init` is an ELF 32-bit ARM EABI5 binary, backed by an arm64 system package that is
+overwhelmingly ARM32 (≈101 executables + 18 shared objects vs 2 AArch64 executables).
+Apple Silicon implements no AArch32 at any exception level, and under HVF the guest reads
+the physical `ID_AA64PFR0_EL1` regardless of `-cpu`, so the guest kernel never sets
+`ARM64_HAS_32BIT_EL0`, `compat_elf_check_arch()` rejects `/init` with `-ENOEXEC`, and the
+initramfs has no fallback init.  The panic's own capability bitmap shows bit 13 absent
+under HVF (`0x20012,28000230`) and present under TCG `cortex-a710` (`0x20013,28402230`).
+
+`qemu.sh` therefore never selects HVF for an aarch64 guest on a Darwin/arm64 host:
+
+```sh
+ACCEL="tcg,tb-size=256"
+ARM32_TCG=1     # ARM32_TCG drives the banner note
+```
+
+This **supersedes** an earlier `sysctl hw.optional.arm.FEAT_SSBS` probe that scoped the
+fallback to M4+.  SSBS was an accidental marker for the first host reported and left
+M1/M2/M3 selecting an accelerator that cannot boot the image; do not reintroduce a
+host-feature predicate.
+
+`QEMU_ACCEL=hvf` overrides.  The restore signal is the *guest artifact* — a CHR arm64
+release whose `/init` and required userspace are AArch64 (every image through 7.23beta5
+still ships ELF32 ARM) — not a QEMU version floor.  Grounded in
+[#11](https://github.com/tikoci/mikropkl/issues/11); full chain in
+`quickchr/docs/m4-hvf-arm64-investigation.md`.  `quickchr` follows the same conclusion —
+keep the two in sync.
 
 ### Why `sysctl kern.hv_support` check before selecting HVF
 

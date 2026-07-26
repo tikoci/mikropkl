@@ -1,0 +1,291 @@
+name: Refresh QEMU Scripts in Releases
+
+# Replaces the generated qemu.sh (and optionally qemu.cfg) inside already-published
+# *.utm.zip release assets, without rebuilding the bundle.
+#
+# Why not just re-run chr.yaml for the same version?  A rebuild regenerates
+# config.plist, and `Randomish.hashUUID` mints a NEW UTM VM Identifier (it reads
+# random.org), so the refreshed bundle would import into UTM as a *different*
+# machine.  This workflow therefore downloads each published asset, swaps only the
+# script files, and re-uploads with the same asset name — the download URL and the
+# `utm://downloadVM?url=...` links keep working, and config.plist/disk bytes are
+# untouched.
+#
+# Run this after a fix that only affects qemu.sh — e.g. the Apple Silicon aarch64
+# TCG fallback (issue #11).
+
+# Serialize runs: two overlapping dispatches could download, patch, and
+# --clobber the same asset, and the loser's upload would win with a stale bundle.
+concurrency:
+  group: refresh-scripts
+  cancel-in-progress: false
+
+# Deny by default; each job re-grants exactly what it needs (plan: contents:read,
+# refresh: contents:write).  Without this, a job added later without a
+# `permissions:` block would silently inherit the repository default token scope.
+permissions: {}
+
+on:
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: 'Released versions to refresh: space-separated (e.g. "7.23.2 7.24rc2"), or "latest", or "latest:N"'
+        default: "latest"
+        type: string
+        required: true
+      tagprefix:
+        description: 'Prefix used in git tag / release'
+        default: "chr-"
+        type: string
+        required: true
+      pklversion:
+        description: 'pkl Version used to regenerate the scripts'
+        default: "0.30.2"
+        type: string
+        required: true
+      dryrun:
+        description: 'Diff only — do not upload the refreshed assets'
+        default: true
+        type: boolean
+      replacecfg:
+        description: 'Also replace qemu.cfg when it differs (default: report only)'
+        default: false
+        type: boolean
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    # Read-only: this job just lists releases to build the matrix.
+    permissions:
+      contents: read
+    outputs:
+      versions: ${{ steps.resolve.outputs.versions }}
+    steps:
+      - name: Resolve version list to a matrix
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          INPUT: ${{ github.event.inputs.versions }}
+          PREFIX: ${{ github.event.inputs.tagprefix }}
+        run: |
+          # pipefail matters here: `gh release list --limit 0` fails but pipes
+          # nothing into jq, which exits 0 — the failure would otherwise be lost.
+          set -euo pipefail
+          case "$INPUT" in
+            latest)    LIMIT=1 ;;
+            latest:*)  LIMIT="${INPUT#latest:}" ;;
+            *)         LIMIT="" ;;
+          esac
+          if [ -n "$LIMIT" ]; then
+            case "$LIMIT" in
+              ''|*[!0-9]*) echo "::error::latest:N needs a number, got '$LIMIT'"; exit 1 ;;
+            esac
+            [ "$LIMIT" -ge 1 ] || { echo "::error::latest:N needs N >= 1, got '$LIMIT'"; exit 1; }
+            # Newest releases first, tag prefix stripped back to a bare version.
+            # ltrimstr (literal) not sub (regex), so a prefix containing regex
+            # metacharacters is handled correctly; --arg keeps the input out of
+            # the filter text.
+            VERSIONS=$(gh release list --limit "$LIMIT" --json tagName \
+              | jq -c --arg prefix "$PREFIX" '[.[].tagName | ltrimstr($prefix)]')
+          else
+            # `grep -v` exits 1 on whitespace-only input; tolerate it here so the
+            # empty-list check below reports it, rather than a bare shell failure.
+            VERSIONS=$(printf '%s\n' "$INPUT" | tr ' ' '\n' | { grep -v '^$' || true; } | jq -R -s -c 'split("\n")[:-1]')
+          fi
+          # An empty list would become an empty matrix — the refresh job would be
+          # skipped and the run would go green having done nothing.  Fail instead.
+          COUNT=$(printf '%s' "${VERSIONS:-}" | jq 'if type == "array" then length else 0 end' 2>/dev/null || echo 0)
+          if [ -z "$COUNT" ] || [ "$COUNT" = "0" ]; then
+            echo "::error::no versions resolved from '$INPUT' — nothing to refresh"
+            exit 1
+          fi
+          # Each matrix value ends up in a shell command and a URL, and the input
+          # is free-form — reject anything that is not a RouterOS version
+          # (7.22, 7.21.5, 7.23beta2, 7.24rc2) before it travels any further.
+          echo "$VERSIONS" | jq -r '.[]' | while read -r V; do
+            case "$V" in
+              *[!0-9a-z.]*|'') echo "::error::not a RouterOS version: '$V'"; exit 1 ;;
+            esac
+            echo "$V" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?((beta|rc)[0-9]+)?$' \
+              || { echo "::error::not a RouterOS version: '$V'"; exit 1; }
+          done
+          echo "versions=$VERSIONS" >> "$GITHUB_OUTPUT"
+          echo "Refreshing: $VERSIONS"
+
+  refresh:
+    runs-on: ubuntu-latest
+    needs: plan
+    # Uploads refreshed release assets and edits release notes.
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        version: ${{ fromJSON(needs.plan.outputs.versions) }}
+      fail-fast: false
+      max-parallel: 1
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.event.inputs.tagprefix }}${{ matrix.version }}
+      CHR_VERSION: ${{ matrix.version }}
+      PKL_VERSION: ${{ github.event.inputs.pklversion }}
+      DRYRUN: ${{ github.event.inputs.dryrun }}
+      REPLACECFG: ${{ github.event.inputs.replacecfg }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # GITHUB_TOKEN here has contents:write and the job never pushes with
+          # git (gh reads it from GH_TOKEN), so keep it out of .git/config.
+          persist-credentials: false
+
+      - name: Install packages into building machine
+        run: |
+          echo "::group::apt-get install"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends zip unzip
+          echo "::endgroup::"
+
+      - name: Install Apple pkl-lang
+        run: |
+          curl -fsSL -o pkl "https://github.com/apple/pkl/releases/download/${PKL_VERSION}/pkl-linux-amd64"
+          chmod +x pkl
+          sudo cp ./pkl /usr/local/bin
+          pkl --version
+
+      - name: Verify the release exists
+        run: |
+          gh release view "$TAG" --json tagName,isDraft --jq '"release \(.tagName) (draft=\(.isDraft))"'
+
+      - name: Generate current scripts with pkl (phase 1 only — no image downloads)
+        run: |
+          echo "::group::pkl eval"
+          pkl eval ./Manifests/*.pkl -m /tmp/fresh
+          echo "::endgroup::"
+          ls /tmp/fresh
+
+      - name: Refresh the launch scripts inside each published asset
+        run: |
+          set -eu
+          CHANGED=""
+          CFG_CHANGED=""
+          VERIFIED=""
+          mkdir -p /tmp/work
+          for ASSET in $(gh release view "$TAG" --json assets --jq '.assets[].name | select(endswith(".utm.zip"))'); do
+            MACHINE="${ASSET%.zip}"
+            echo "::group::$ASSET"
+            if [ ! -f "/tmp/fresh/$MACHINE/qemu.sh" ]; then
+              echo "SKIP: pkl produced no $MACHINE — manifest set changed since this release"
+              echo "::endgroup::"
+              continue
+            fi
+            rm -rf "/tmp/work/$MACHINE" "/tmp/$ASSET"
+            gh release download "$TAG" --pattern "$ASSET" --dir /tmp
+            unzip -q "/tmp/$ASSET" -d /tmp/work
+
+            # Decide per file, so `replacecfg=true` still works on an asset whose
+            # qemu.sh is already current (and so a re-run can recover an upload
+            # whose release-note step failed).
+            SH_STALE=0; CFG_STALE=0
+            cmp -s "/tmp/work/$MACHINE/qemu.sh"  "/tmp/fresh/$MACHINE/qemu.sh"  || SH_STALE=1
+            cmp -s "/tmp/work/$MACHINE/qemu.cfg" "/tmp/fresh/$MACHINE/qemu.cfg" || CFG_STALE=1
+
+            if [ "$SH_STALE" = "1" ]; then
+              diff -u "/tmp/work/$MACHINE/qemu.sh" "/tmp/fresh/$MACHINE/qemu.sh" || true
+              cp "/tmp/fresh/$MACHINE/qemu.sh" "/tmp/work/$MACHINE/qemu.sh"
+              chmod a+x "/tmp/work/$MACHINE/qemu.sh"
+            else
+              echo "qemu.sh already current"
+              # This also makes a re-run repair release-note provenance when a
+              # previous run uploaded successfully but its note step failed.
+              VERIFIED="$VERIFIED $MACHINE"
+            fi
+
+            # qemu.cfg is expected to be stable (its MAC is derived deterministically
+            # from the machine name) — report drift rather than silently changing the
+            # machine definition, since config.plist is intentionally left untouched.
+            REPLACED_CFG=0
+            if [ "$CFG_STALE" = "1" ]; then
+              diff -u "/tmp/work/$MACHINE/qemu.cfg" "/tmp/fresh/$MACHINE/qemu.cfg" || true
+              if [ "$REPLACECFG" = "true" ]; then
+                echo "NOTE: replacing qemu.cfg (replacecfg=true)"
+                cp "/tmp/fresh/$MACHINE/qemu.cfg" "/tmp/work/$MACHINE/qemu.cfg"
+                REPLACED_CFG=1
+              else
+                echo "WARNING: qemu.cfg differs from the published asset — left as published."
+                echo "         Re-run with replacecfg=true if the new definition is intended."
+              fi
+            fi
+
+            if [ "$SH_STALE" = "0" ] && [ "$REPLACED_CFG" = "0" ]; then
+              echo "nothing to do for $ASSET"
+              echo "::endgroup::"
+              continue
+            fi
+
+            rm -f "/tmp/$ASSET"
+            ( cd /tmp/work && zip -q -r "/tmp/$ASSET" "$MACHINE" )
+            if [ "$DRYRUN" = "true" ]; then
+              echo "dry run: would upload $ASSET ($(du -h "/tmp/$ASSET" | cut -f1))"
+            else
+              gh release upload "$TAG" "/tmp/$ASSET" --clobber
+              echo "uploaded $ASSET"
+              [ "$SH_STALE" = "1" ] && VERIFIED="$VERIFIED $MACHINE" || true
+            fi
+            CHANGED="$CHANGED $MACHINE"
+            [ "$REPLACED_CFG" = "1" ] && CFG_CHANGED="$CFG_CHANGED $MACHINE" || true
+            echo "::endgroup::"
+          done
+          {
+            echo "### $TAG"
+            if [ -z "$CHANGED" ]; then
+              echo "No asset needed a refresh."
+            else
+              echo "Refreshed:"
+              for M in $CHANGED; do
+                case " $CFG_CHANGED " in
+                  *" $M "*) echo "- \`$M.zip\` — \`qemu.sh\` + \`qemu.cfg\`" ;;
+                  *)        echo "- \`$M.zip\` — \`qemu.sh\`" ;;
+                esac
+              done
+              if [ "$DRYRUN" = "true" ]; then
+                echo ""
+                echo "_(dry run — nothing uploaded)_"
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Trim the leading separator so the value is exactly the machine list.
+          {
+            echo "REFRESHED=${CHANGED# }"
+            echo "REFRESHED_CFG=${CFG_CHANGED# }"
+            echo "VERIFIED=${VERIFIED# }"
+          } >> "$GITHUB_ENV"
+
+      - name: Record the refresh in the release notes
+        if: ${{ github.event.inputs.dryrun != 'true' }}
+        run: |
+          set -eu
+          [ -n "${VERIFIED:-}" ] || { echo "no current assets verified — release notes untouched"; exit 0; }
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          gh release view "$TAG" --json body --jq .body > /tmp/body.md
+          # Idempotent: a re-run from the same commit must not stack notes.
+          if grep -qF "launch scripts refreshed" /tmp/body.md && grep -qF "$SHORT_SHA" /tmp/body.md; then
+            echo "release notes already record a refresh from $SHORT_SHA — leaving them alone"
+            exit 0
+          fi
+          # Describe the verified postcondition, not only work done in this
+          # attempt. That remains truthful when this is a recovery run after
+          # assets were uploaded but the previous release-note update failed.
+          # shellcheck disable=SC2016  # backticks are markdown, not substitution
+          if [ "$REPLACECFG" = "true" ]; then
+            WHAT='`qemu.sh` and `qemu.cfg` now match this commit'
+          else
+            WHAT='`qemu.sh` now matches this commit; `qemu.cfg` was left as published'
+          fi
+          {
+            echo ""
+            echo "> **QEMU launch scripts refreshed** $(date -u +%Y-%m-%d) from \`$SHORT_SHA\`."
+            echo "> $WHAT — \`config.plist\` (VM identity) and the disk image are unchanged."
+          } >> /tmp/body.md
+          gh release edit "$TAG" --notes-file /tmp/body.md

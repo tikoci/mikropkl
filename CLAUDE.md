@@ -35,12 +35,14 @@ Files/
   efi_vars.fd         ← UEFI variable store (copied into Apple-backend bundles)
   QEMU.md             ← user-facing QEMU deployment guide
 Machines/             ← build output (git-ignored except .url/.size placeholders)
+Tests/                ← anchor tests (see Tests/README.md); `make test`, no QEMU needed
 Lab/                  ← local experiments, debug scripts, investigation notes (NOT build artifacts)
   libvirt/            ← libvirt experiment docs and notes (see LIBVIRT.md inside)
   qemu-arm64/         ← QEMU aarch64 boot investigation (see NOTES.md inside)
   x86-direct-kernel/  ← x86 direct kernel boot experiments (see NOTES.md inside)
 .github/workflows/
   chr.yaml            ← builds and releases UTM packages to GitHub Releases
+  test.yaml           ← anchor tests on push/PR (no QEMU): accel decision table
   qemu-test.yaml      ← boots each QEMU machine via qemu.sh and runs REST API checks
   libvirt-test.yaml   ← historical: precursor to qemu-test.yaml (parses XML → raw QEMU)
   auto.yaml           ← automated trigger for chr.yaml on new RouterOS versions
@@ -610,6 +612,38 @@ make qemu-status
 | `auto.yaml` | scheduled | Triggers `chr.yaml` when a new RouterOS version is detected |
 | `qemu-test.yaml` | manual dispatch | Boots each QEMU machine via qemu.sh and runs REST API checks |
 | `libvirt-test.yaml` | manual dispatch | Historical: precursor to qemu-test.yaml (parses XML → raw QEMU) |
+| `refresh-scripts.yaml` | manual dispatch | Replaces `qemu.sh` inside already-published release assets (see below) |
+| `test.yaml` | push / PR | Anchor tests — pkl evaluates, `qemu.sh` accel decision table (`Tests/`) |
+
+### refresh-scripts.yaml — Fixing `qemu.sh` in already-published releases
+
+A `qemu.sh` fix only reaches users who download a *new* ZIP, so releases already on
+GitHub keep shipping the old launcher.  This workflow patches the published assets in
+place:
+
+```sh
+gh workflow run refresh-scripts.yaml -f versions="7.23.2 7.24rc2" -f dryrun=true   # diff only
+gh workflow run refresh-scripts.yaml -f versions="latest:4"       -f dryrun=false  # upload
+```
+
+`versions` accepts a space-separated list, `latest`, or `latest:N` (N newest releases).
+Each matrix job runs pkl **phase 1 only** (no image downloads), downloads each
+`*.utm.zip` asset, swaps `qemu.sh`, re-zips, and `gh release upload --clobber`s under the
+same asset name — so download URLs and `utm://downloadVM?url=...` links keep working.
+
+**Why not just re-run `chr.yaml` for the same version?**  A full rebuild regenerates
+`config.plist`, and `Randomish.hashUUID` reads random.org — the bundle would get a **new
+UTM VM Identifier** and import as a *different* machine, plus the disk image bytes would
+be re-fetched for no reason.  The surgical swap leaves `config.plist`, `Data/`, and the
+MAC address untouched.  `qemu.cfg` is regenerated for comparison but only reported (it is
+deterministic — verified byte-identical against the published `chr-7.22.1` assets);
+`replacecfg=true` opts into replacing it, which should be rare since `config.plist` is
+deliberately left alone.
+
+The git tag for a refreshed release still points at the original builder commit; the
+workflow appends a `> QEMU launch scripts refreshed <date> from <sha>` line to the release
+notes so the drift is recorded.  Users on an un-refreshed ZIP have the manual escape:
+`QEMU_ACCEL=tcg ./qemu.sh`.
 
 ### qemu-test.yaml — How the CI Works
 
@@ -638,12 +672,18 @@ confirmed by [actions/runner-images#13505](https://github.com/actions/runner-ima
 
 #### macOS HVF — CPU model (when HVF is available, e.g. bare metal)
 
-With `-accel hvf` on Apple Silicon, QEMU uses the host CPU directly via
-Hypervisor.framework.  `cortex-a710` is ARMv9.0 and requires SVE2; Apple M-series chips
-are ARMv8.5/8.6 and do not expose SVE2 through HVF.  Attempting `-cpu cortex-a710` with
-HVF causes QEMU to crash during CPU init (before the VM even starts), which manifests as
-socat getting "Connection refused" on the serial socket (the socket file exists from
-`bind()` but QEMU never reached `listen()`).
+With `-accel hvf`, QEMU runs the guest on the host CPU via Hypervisor.framework, so a
+fixed CPU model such as `cortex-a710` cannot be instantiated — QEMU aborts during CPU
+init, before the VM starts.  The failure is subtle: QEMU has already created the chardev
+Unix sockets (`bind()` early in init) but never reaches `listen()`, so socat clients get
+"Connection refused" instead of a clear error.  Fix is `-cpu host` whenever `ACCEL=hvf`.
+
+Scope of that fix: it only gets QEMU *started*.  Under HVF the CPU model is inert for
+feature advertisement — the guest reads the physical ID registers regardless, confirmed
+on an M4 where `-cpu max` behaved identically to `-cpu host`
+([#11](https://github.com/tikoci/mikropkl/issues/11)).  So `-cpu` cannot mask a host
+feature gap — which is why no model restores the AArch32 EL0 that arm64 CHR's 32-bit
+`/init` needs; see the aarch64/TCG section below.
 
 **Fix (in `qemu.sh`, generated by `QemuCfg.pkl`):**
 ```sh
@@ -656,6 +696,68 @@ fi
 The serial socket race (socat "Connection refused") is a secondary symptom handled by
 using `socat` with `retry=10,interval=1` in the workflow, so socat retries the connect
 rather than failing immediately if QEMU hasn't called `listen()` yet.
+
+#### macOS HVF — aarch64 CHR falls back to TCG on all Apple Silicon
+
+aarch64 CHR under HVF starts the guest kernel and then panics immediately after the EFI
+stub hands over; TCG boots the identical image:
+
+```text
+EFI stub: Exiting boot services and installing virtual address map...
+[    0.076915][    T1] Kernel panic - not syncing: No working init found.
+[    0.077995][    T1] CPU features: 0x20012,28000230
+```
+
+**Root cause — the image is mixed-ISA, not a host CPU bug.**  `BOOTAA64.EFI` is an
+AArch64 Linux 5.6.3 kernel with an appended XZ initramfs whose `/init` is an
+**ELF 32-bit LSB ARM EABI5** static binary; the arm64 system package is likewise ~101
+ARM32 executables and 18 ARM32 shared objects against 2 AArch64 executables.  Apple
+Silicon implements no AArch32 at any exception level, and under HVF the guest reads the
+physical `ID_AA64PFR0_EL1` (QEMU keeps it hardware-backed for every CPU model), so the
+guest kernel never sets `ARM64_HAS_32BIT_EL0`, `compat_elf_check_arch()` rejects `/init`
+with `-ENOEXEC`, and — no `/sbin/init`, `/etc/init`, `/bin/init`, or `/bin/sh` fallback
+in the initramfs — Linux panics.  The panic's own capability bitmap confirms it
+(`%*pb`, MSB chunk first, `ARM64_NCAPS == 51`):
+
+| Guest | Bitmap | Caps | bit 13 = `ARM64_HAS_32BIT_EL0` |
+|---|---|---|---|
+| M4, HVF `-cpu host` — panics | `0x20012,28000230` | 8 | **absent** |
+| TCG `cortex-a710` — boots | `0x20013,28402230` | 11 | **present** |
+
+The M4 set is a strict subset; the only other differences are `ARM64_SVE` (22) and
+`ARM64_HAS_STAGE2_FWB` (32), neither of which participates in `execve()`.
+
+Verified locally on this Intel Mac (static analysis needs no Apple Silicon): the XZ
+stream at offset 11,739,140 of 7.22.1's `BOOTAA64.EFI` decompresses to a 169,984-byte
+`newc` archive whose `/init` is ELF32 ARM, SHA-256 `69859b2f…e706` — and 7.20.8,
+7.23beta2, and 7.23beta5 are the same.  The cap numbering and the
+`system_supports_32bit_el0()` gate were checked against MikroTik's own disclosed
+5.6.3 tree in `~/GitHub/mikrotik-gpl`, not just upstream.
+
+**Fix in `qemu.sh`** — unconditional for Darwin/arm64 hosts with an aarch64 guest:
+
+```sh
+ACCEL="tcg,tb-size=256"
+ARM32_TCG=1            # drives the one-line note in the launch banner
+```
+
+**Superseded: the `FEAT_SSBS=0` (M4+) probe.**  SSBS was only an accidental marker for
+the first host reported — it left M1/M2/M3 selecting HVF for an image that cannot boot
+there either.  Do not reintroduce a host-feature predicate; no Apple Silicon generation
+can run this guest under HVF.
+
+**Restore signal is the guest artifact, not the host or QEMU.**  A QEMU version floor is
+not a credible trigger: no released or proposed QEMU makes Apple hardware execute
+AArch32 guest userspace (the SSBS shim RFC is unrelated to this).  What would restore HVF
+is a CHR arm64 release whose `/init` *and* required userspace are AArch64 — check with
+the offset/`file` procedure above, then retest with `QEMU_ACCEL=hvf`, which still
+overrides.  The downgrade is never silent — the banner explains it and points at
+[QEMU.md#hvf-on-apple-silicon](https://github.com/tikoci/mikropkl/blob/main/Files/QEMU.md#hvf-on-apple-silicon)
+(the old `#hvf-on-apple-m4-and-later` anchor is preserved in that file because published
+`qemu.sh` scripts link to it).
+
+Full evidence chain: `quickchr/docs/m4-hvf-arm64-investigation.md`.  `quickchr` keys on
+the same conclusion in `src/lib/platform.ts` — keep the two in sync.
 
 #### CI conventions for `apt-get` and downloads
 

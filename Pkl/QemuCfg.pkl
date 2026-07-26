@@ -218,6 +218,11 @@ function launchScript(
   cd "$SCRIPT_DIR"
 
   # ── Accelerator detection ──
+  # ARM32_TCG is set to 1 when HVF was available but deliberately skipped because
+  # the guest image needs AArch32 that the host cannot provide (see the Darwin
+  # branch below); it drives a one-line note in the launch banner so the slower
+  # accelerator is never silent.
+  ARM32_TCG=0
   ACCEL="${QEMU_ACCEL:-}"
   if [ -z "$ACCEL" ]; then
     HOST_ARCH="$(uname -m)"
@@ -238,7 +243,27 @@ function launchScript(
         if [ "$HV_SUPPORT" = "1" ] && [ "$HOST_ARCH" = "x86_64" ] && [ "\(archBin)" = "x86_64" ]; then
           ACCEL="hvf"
         elif [ "$HV_SUPPORT" = "1" ] && [ "$HOST_ARCH" = "arm64" ] && [ "\(archBin)" = "aarch64" ]; then
-          ACCEL="hvf"
+          # aarch64 CHR cannot boot under HVF on *any* Apple Silicon host, so
+          # TCG is selected unconditionally here.  The image is mixed-ISA: the
+          # kernel is AArch64, but the /init it execs is a 32-bit ARM (EABI5)
+          # binary, as is most of the system package.  Apple Silicon implements
+          # no AArch32 at any exception level, and under HVF the guest reads the
+          # physical ID registers (the -cpu model is inert — -cpu max panics
+          # identically), so the guest kernel never sets ARM64_HAS_32BIT_EL0,
+          # compat_elf_check_arch() rejects /init with -ENOEXEC, and the boot
+          # ends in "No working init found" ~0.08s in.  TCG's cortex-a710 does
+          # provide AArch32 EL0, which is why the identical image boots there.
+          #
+          # This supersedes the earlier FEAT_SSBS=0 (M4+) probe: SSBS was only
+          # an accidental marker for the first host reported, and left M1/M2/M3
+          # selecting HVF for a guest that cannot run on it.  See issue #11.
+          #
+          # Restore signal is the *guest artifact*, not the host or QEMU: a CHR
+          # arm64 release whose /init and required userspace are AArch64.  Every
+          # image through 7.23beta5 still ships ELF32 ARM.  QEMU_ACCEL=hvf
+          # overrides, which is how a future fixed image gets tested.
+          ACCEL="tcg,tb-size=256"
+          ARM32_TCG=1
         else
           ACCEL="tcg,tb-size=256"
         fi
@@ -298,10 +323,14 @@ function launchScript(
   PFLASH_FLAGS="-drive if=pflash,format=raw,readonly=on,unit=0,file=$EFI_CODE"
   PFLASH_FLAGS="$PFLASH_FLAGS -drive if=pflash,format=raw,unit=1,file=$VARS_COPY"
   CPU_FLAGS="-cpu cortex-a710"
-  # HVF on macOS uses the host CPU directly via Hypervisor.framework.
-  # cortex-a710 is ARMv9.0 (requires SVE2); Apple M-series is ARMv8.5/8.6 and
-  # does not expose SVE2 via HVF, causing QEMU to crash during CPU init.
-  # Override to -cpu host so QEMU uses the actual host CPU feature set.
+  # HVF runs the guest on the host CPU via Hypervisor.framework, so a fixed model
+  # like cortex-a710 cannot be instantiated — QEMU aborts during CPU init (the
+  # chardev sockets already exist from bind() but never reach listen(), so
+  # clients see "Connection refused" rather than a clear error).  Use -cpu host.
+  # This only fixes *starting* QEMU: under HVF the CPU model is inert, the guest
+  # reads the physical ID registers regardless (-cpu max behaves identically on
+  # an M4) — which is why no -cpu model restores the AArch32 EL0 that CHR's
+  # 32-bit /init needs.  See the AArch32 note in accelerator detection above.
   if [ "$ACCEL" = "hvf" ]; then
     CPU_FLAGS="-cpu host"
   fi
@@ -460,6 +489,10 @@ function launchScript(
     ${QEMU_EXTRA:-}"
 
   if [ "$DRY_RUN" = "1" ]; then
+    # Note on stderr so stdout stays a clean, pipeable command line.
+    if [ "$ARM32_TCG" = "1" ]; then
+      echo "note: arm64 CHR needs AArch32, Apple Silicon has none — TCG selected; QEMU_ACCEL=hvf to retest" >&2
+    fi
     echo "$CMD"
     exit 0
   fi
@@ -491,6 +524,15 @@ function launchScript(
     kvm|hvf) _ACCEL_TAG="${_G}accelerated${_R}" ;;
     *)       _ACCEL_TAG="${_Y}emulated${_R}" ;;
   esac
+
+  # Explain the HVF→TCG downgrade rather than silently running slower.
+  if [ "$ARM32_TCG" = "1" ]; then
+    echo ""
+    echo "  ${_Y}Note:${_R} RouterOS's arm64 image runs a ${_B}32-bit ARM${_R} init, and Apple Silicon has"
+    echo "        no AArch32 — under ${_B}-accel hvf${_R} the guest panics with \\"No working init"
+    echo "        found\\".  TCG is used instead — slower, but it boots."
+    echo "        Retest HVF with ${_B}QEMU_ACCEL=hvf${_R};  see ${DOCS_URL}#hvf-on-apple-silicon"
+  fi
 
   if [ "$BACKGROUND" = "1" ]; then
     nohup sh -c "exec $CMD" >/tmp/qemu-\(vmName).log 2>&1 &

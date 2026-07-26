@@ -19,7 +19,7 @@ Install QEMU once, then every CHR package works.
 brew install qemu
 ```
 
-Homebrew provides `qemu-system-x86_64`, `qemu-system-aarch64`, and all UEFI firmware files.  On Intel Macs, QEMU uses Apple's Hypervisor.framework (HVF) for near-native speed.  On Apple Silicon, HVF accelerates aarch64 guests; x86_64 guests run under TCG emulation.
+Homebrew provides `qemu-system-x86_64`, `qemu-system-aarch64`, and all UEFI firmware files.  On Intel Macs, QEMU uses Apple's Hypervisor.framework (HVF) for near-native speed.  On Apple Silicon, aarch64 guests fall back to TCG — RouterOS's arm64 image needs AArch32, which Apple Silicon does not implement ([why](#hvf-on-apple-silicon)).  x86_64 guests run under TCG emulation on any Apple Silicon Mac.
 
 ### Ubuntu / Debian
 
@@ -691,7 +691,7 @@ Each `router*.qcow2` is a thin clone (~200 KB initially) storing only its own ch
 | x86_64 on Intel/AMD host (KVM) | ~10s | Bare-metal Linux, fastest |
 | x86_64 on macOS Intel (HVF) | ~10s | Near-native via Hypervisor.framework |
 | aarch64 on ARM host (KVM) | ~10–15s | ARM servers, Raspberry Pi 5, etc. |
-| aarch64 on macOS Apple Silicon (HVF) | ~10s | M1/M2/M3 native |
+| aarch64 on macOS Apple Silicon (TCG) | ~20–60s | Automatic fallback — [HVF cannot run this image](#hvf-on-apple-silicon) |
 | aarch64 on x86_64 host (TCG) | ~20s | Cross-arch — fast because ARM uses MMIO |
 | x86_64 on macOS Intel (TCG) | ~30–60s | Same-arch emulation, no HVF |
 
@@ -719,6 +719,101 @@ sudo modprobe kvm-intel    # or kvm-amd
 sudo usermod -aG kvm "$USER"
 # Log out and back in
 ```
+
+On macOS, `accel=tcg` for an aarch64 machine on Apple Silicon is expected on every
+Apple Silicon host — see [HVF on Apple Silicon](#hvf-on-apple-silicon).
+
+<a id="hvf-on-apple-m4-and-later"></a>
+
+### HVF on Apple Silicon
+
+On **every** Apple Silicon host — M1 through M4 and later — `qemu.sh` deliberately
+runs **aarch64** machines under TCG and prints:
+
+```text
+  Note: RouterOS's arm64 image runs a 32-bit ARM init, and Apple Silicon has
+        no AArch32 — under -accel hvf the guest panics with "No working init
+        found".  TCG is used instead — slower, but it boots.
+```
+
+What is observed under HVF: the guest kernel starts and then panics moments after
+the EFI stub hands over, while TCG boots the identical image.
+
+```text
+EFI stub: Exiting boot services and installing virtual address map...
+Kernel panic - not syncing: No working init found.
+```
+
+#### Why
+
+The arm64 CHR image is **mixed-ISA**.  Its kernel is AArch64, but the first program
+that kernel executes is not:
+
+```text
+/EFI/BOOT/BOOTAA64.EFI          arm64 Linux 5.6.3 EFI-stub kernel
+  └─ appended XZ initramfs
+       └─ /init                 ELF 32-bit LSB executable, ARM, EABI5, static
+```
+
+The system package is the same story — the 7.22.1 arm64 image ships 101 ARM32
+executables and 18 ARM32 shared objects against 2 AArch64 executables.  RouterOS's
+userspace on arm64 is 32-bit ARM.
+
+Apple Silicon implements no AArch32 at any exception level.  Under HVF the guest
+reads the *physical* CPU ID registers, so the guest kernel never sets
+`ARM64_HAS_32BIT_EL0`, `compat_elf_check_arch()` rejects the `EM_ARM` `/init` with
+`-ENOEXEC`, and — the initramfs having no `/sbin/init`, `/etc/init`, `/bin/init`, or
+`/bin/sh` fallback — Linux panics exactly as above.  The panic line printed the guest's
+capability bitmap, which confirms it directly:
+
+| Guest | Bitmap | `ARM64_HAS_32BIT_EL0` (bit 13) |
+|---|---|---|
+| Apple M4, HVF `-cpu host` — panics | `0x20012,28000230` | absent |
+| TCG `cortex-a710` — boots | `0x20013,28402230` | present |
+
+`-cpu` cannot close the gap: the model is inert under HVF (`-cpu max` panics
+identically) because QEMU keeps the live vCPU's hardware-backed `ID_AA64PFR0_EL1`.
+TCG's fixed models do provide AArch32 EL0, which is why TCG boots.
+
+#### When this gets reverted
+
+The restore signal is the **guest image**, not the host or the QEMU version: a CHR
+arm64 release whose `/init` *and* required userspace are AArch64.  Every image checked
+through 7.23beta5 still ships an ELF32 ARM `/init`.  Verify it yourself with
+`file` on the initramfs, then retest:
+
+```sh
+QEMU_ACCEL=hvf ./qemu.sh
+```
+
+An earlier version of this fallback keyed on `sysctl -n hw.optional.arm.FEAT_SSBS`
+(`0` on M4+, `1` on M1/M2/M3) and so applied only to M4-and-later.  That was too
+narrow — SSBS was an accidental marker for the first host reported, and M1/M2/M3
+cannot run this image either.  Reported in
+[tikoci/mikropkl#11](https://github.com/tikoci/mikropkl/issues/11); full evidence in
+[quickchr's investigation notes](https://github.com/tikoci/quickchr/blob/main/docs/m4-hvf-arm64-investigation.md).
+
+**Downloaded a package before this fix?**  Its `qemu.sh` may still auto-select HVF and
+panic.  Either force the accelerator yourself:
+
+```sh
+QEMU_ACCEL=tcg ./qemu.sh
+```
+
+or re-download the ZIP **if that release has been refreshed** — published assets are
+patched in place (same URL, same VM identity), and a refreshed release says so in its
+notes:
+
+```text
+> QEMU launch scripts refreshed 2026-07-25 from abc1234.
+```
+
+Refreshing is a manual, per-release operation, so an older release may still carry the
+pre-fix launcher — `QEMU_ACCEL=tcg` always works regardless.  Ask in an issue if you need a
+specific version refreshed.
+
+x86_64 machines are unaffected, and on Apple Silicon they run under TCG anyway
+(cross-architecture).
 
 ### Port conflict
 
@@ -771,4 +866,3 @@ ss -tlnp | grep 9180  # Linux
 - **DHCP server with user-mode networking:** QEMU's SLIRP backend does not pass broadcast traffic, so running a DHCP server in the CHR for external clients requires bridge or tap networking.
 - **Disk size:** The CHR image is 128 MiB.  RouterOS manages its own partition layout — there is no need to resize it for typical use.
 - **x86_64 on ARM64 hosts:** Not viable under TCG emulation (see [Architecture Notes](#architecture-notes)).
-

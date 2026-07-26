@@ -1,0 +1,68 @@
+name: Tests
+
+# Fast PR check: generates the launch scripts with pkl and asserts the qemu.sh
+# accelerator decision table (Tests/README.md).  No QEMU, no disk images — the
+# boot tests live in qemu-test.yaml, which is manually dispatched.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pklversion:
+        description: 'pkl Version'
+        default: "0.30.2"
+        type: string
+        required: true
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  anchor-tests:
+    runs-on: ubuntu-latest
+    # Only reads the repository.
+    permissions:
+      contents: read
+    env:
+      PKL_VERSION: ${{ github.event.inputs.pklversion || '0.30.2' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Apple pkl-lang
+        run: |
+          curl -fsSL -o pkl "https://github.com/apple/pkl/releases/download/${PKL_VERSION}/pkl-linux-amd64"
+          chmod +x pkl
+          sudo cp ./pkl /usr/local/bin
+          pkl --version
+
+      - name: Accelerator decision table
+        run: make test
+
+      - name: All manifests evaluate
+        run: |
+          echo "::group::pkl eval (all manifests)"
+          CHR_VERSION=7.22.1 pkl eval ./Manifests/*.pkl -m /tmp/all
+          echo "::endgroup::"
+          # Every generated launcher must be valid POSIX sh — Ubuntu runs these
+          # under dash, which is stricter than bash.
+          #
+          # Accumulate into RC rather than relying on the loop's exit status: a
+          # `for` loop reports only its *last* iteration, and `set -e` exempts the
+          # left-hand side of `&&`, so a failing launcher earlier in the glob would
+          # otherwise pass the step silently.
+          RC=0
+          for SH in /tmp/all/*/qemu.sh; do
+            if sh -n "$SH"; then
+              echo "ok: sh -n $SH"
+            else
+              echo "FAIL: sh -n $SH"
+              RC=1
+            fi
+          done
+          exit "$RC"
