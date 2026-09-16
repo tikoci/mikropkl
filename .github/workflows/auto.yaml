@@ -94,21 +94,29 @@ jobs:
   dispatch-fat-chr:
     needs: check
     runs-on: ubuntu-latest
-    name: Trigger fat-chr Auto Build
+    name: Trigger fat-chr Auto Build and Wait
     if: ${{ fromJSON(needs.check.outputs.versions)[0] != null }}
-    continue-on-error: true
     steps:
-      - name: Trigger tikoci/fat-chr auto workflow via dispatch
-        uses: actions/github-script@v6
+      # chr.x86_64.apple pulls its image from a tikoci/fat-chr release matching
+      # the RouterOS version (see Manifests/chr.x86_64.apple.pkl). Without waiting
+      # here, the `build` job below dispatches chr.yaml immediately, which starts
+      # downloading that release before fat-chr has finished building/publishing
+      # it — a 404 that fails phase1 (Makefile:84). sync-status makes this job
+      # (and therefore the `build` job below, gated on its result) fail if the
+      # fat-chr run itself fails or times out, instead of racing ahead against a
+      # release that will never show up. See CLAUDE.md "fat-chr Integration into
+      # Makefile" for the longer-term fix of dropping the cross-repo dependency.
+      - name: Trigger tikoci/fat-chr auto workflow and wait for it to finish
+        uses: benc-uk/workflow-dispatch@d004979be141727c7a17c28f603e2facc40d0855 # v1.3.3
         with:
-          github-token: ${{ secrets.FAT_CHR_TOKEN }}
-          script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: 'tikoci',
-              repo: 'fat-chr',
-              workflow_id: 'auto.yaml',
-              ref: 'main'
-            })
+          workflow: auto.yaml
+          repo: tikoci/fat-chr
+          ref: main
+          token: ${{ secrets.FAT_CHR_TOKEN }}
+          wait-for-completion: true
+          wait-timeout-seconds: 1200
+          wait-interval-seconds: 15
+          sync-status: true
 
   build:
     needs:
@@ -119,6 +127,7 @@ jobs:
     if: |
       always() &&
       needs.check.result == 'success' &&
+      needs.dispatch-fat-chr.result == 'success' &&
       fromJSON(needs.check.outputs.versions)[0] != null
     strategy:
       matrix:

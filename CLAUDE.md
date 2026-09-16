@@ -880,8 +880,11 @@ A CLI tool that downloads and manages RouterOS CHR instances from GitHub Release
 
 The `tikoci/fat-chr` repackaging step (converts proprietary x86 boot partition to FAT16
 EFI) could be done directly in the Makefile using `qemu-img` and `mtools` (already
-available as build dependencies).  This would eliminate the `auto.yaml` timing issue where
-the mikropkl build triggers fat-chr but doesn't wait for it to complete.
+available as build dependencies).  `auto.yaml`'s `dispatch-fat-chr` job now waits for
+fat-chr's build to finish (and fails closed via `sync-status` if it doesn't) before
+`chr.yaml` is triggered, so the immediate 404-on-missing-release race is fixed.  Folding
+the repackaging step into this Makefile would still be worthwhile to drop the cross-repo
+dependency and per-version coupling entirely.
 
 ### Post-Boot Automation (Priority: Low)
 

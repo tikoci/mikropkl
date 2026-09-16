@@ -51,7 +51,7 @@
 
 ## fat-chr Dependency
 
-`chr.x86_64.apple` bundles require the repackaged EFI image from `tikoci/fat-chr`.  The `auto.yaml` workflow triggers fat-chr's auto build but does not wait for it to complete — this is a known timing issue.  Consider integrating the repackaging step directly into the Makefile since the tools (`qemu-img`, `mtools`) are already available.
+`chr.x86_64.apple` bundles require the repackaged EFI image from `tikoci/fat-chr`.  The `auto.yaml` workflow triggers fat-chr's auto build and waits for it to complete (`dispatch-fat-chr` job, `benc-uk/workflow-dispatch` with `wait-for-completion` + `sync-status`) before dispatching `chr.yaml` — this closed the race where `chr.yaml` would 404 downloading a release fat-chr hadn't published yet.  The cross-repo dependency itself remains; consider integrating the repackaging step directly into the Makefile since the tools (`qemu-img`, `mtools`) are already available.
 
 ## Cross-Architecture CI Strategy
 
