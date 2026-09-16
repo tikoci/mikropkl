@@ -94,21 +94,26 @@ jobs:
   dispatch-fat-chr:
     needs: check
     runs-on: ubuntu-latest
-    name: Trigger fat-chr Auto Build
+    name: Trigger fat-chr Auto Build and Wait
     if: ${{ fromJSON(needs.check.outputs.versions)[0] != null }}
     continue-on-error: true
     steps:
-      - name: Trigger tikoci/fat-chr auto workflow via dispatch
-        uses: actions/github-script@v6
+      # chr.x86_64.apple pulls its image from a tikoci/fat-chr release matching
+      # the RouterOS version (see Manifests/chr.x86_64.apple.pkl). Without waiting
+      # here, the `build` job below dispatches chr.yaml immediately, which starts
+      # downloading that release before fat-chr has finished building/publishing
+      # it — a 404 that fails phase1 (Makefile:84). See CLAUDE.md "fat-chr
+      # Integration into Makefile" for the long-term fix.
+      - name: Trigger tikoci/fat-chr auto workflow and wait for it to finish
+        uses: benc-uk/workflow-dispatch@v1
         with:
-          github-token: ${{ secrets.FAT_CHR_TOKEN }}
-          script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: 'tikoci',
-              repo: 'fat-chr',
-              workflow_id: 'auto.yaml',
-              ref: 'main'
-            })
+          workflow: auto.yaml
+          repo: tikoci/fat-chr
+          ref: main
+          token: ${{ secrets.FAT_CHR_TOKEN }}
+          wait-for-completion: true
+          wait-timeout-seconds: 1200
+          wait-interval-seconds: 15
 
   build:
     needs:
